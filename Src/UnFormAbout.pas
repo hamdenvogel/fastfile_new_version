@@ -1,20 +1,3 @@
-//********************************************************************************************************************************
-//*                                                                                                                              *
-//*     TFormAbout 1.0 © 3delite 2006                                                                                            *
-//*     See TFormAbout.txt for details                                                                                           *
-//*                                                                                                                              *
-//* Two licenses are available if you like this component:                                                                       *
-//* Registration: 15 Euros                                                                                                       *
-//* Commercial license: 100 Euros                                                                                                *
-//*                                                                                                                              *
-//*     http://www.3delite.hu/Object Pascal Developer Resources/tformabout.html                                                  *
-//*                                                                                                                              *
-//* If you have any of the aforementioned please email: 3delite@3delite.hu                                                       *
-//*                                                                                                                              *
-//* Good coding! :)                                                                                                              *
-//* 3delite                                                                                                                      *
-//********************************************************************************************************************************
-
 unit UnFormAbout;
 
 interface
