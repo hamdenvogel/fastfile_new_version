@@ -80,8 +80,18 @@ type
   procedure ExtractDirResource(const ResourceName, OutputDir: string);
   function ExecuteWithoutFreezing(const Command: string): Boolean;
   function ForceDeleteFile(const APath: string): Boolean;
+  { Snapshot do ficheiro no disco (tamanho + ftLastWriteTime) para detetar alteracoes externas. }
+  procedure GetFileSizeAndWriteTime(const FileName: string; out Size: Int64; out LastWrite: TFileTime);
+  function SameFileSizeAndWriteTime(const FileName: string; const Size: Int64; const LastWrite: TFileTime): Boolean;
+  { Escreve temp e substitui destino com retries (padrao save atomico). }
+  function TryRenameTempOverTarget(const TempPath, TargetPath: string; out ErrMsg: string): Boolean;
+  { Verifica espaco livre no volume que contem AnyPathOnVolume (falha API = assume OK). }
+  function VolumeHasMinFreeBytes(const AnyPathOnVolume: string; const MinFree: Int64): Boolean;
 
 implementation
+
+uses
+  uI18n;
 
 function DefaultDateFormat(const Value: string): string;
 var
@@ -1708,6 +1718,112 @@ begin
   end
   else
     ShowMessage('Não foi possível deletar o arquivo: ' + Msg);
+end;
+
+procedure GetFileSizeAndWriteTime(const FileName: string; out Size: Int64; out LastWrite: TFileTime);
+var
+  H: THandle;
+  FD: TWin32FindData;
+begin
+  Size := 0;
+  FillChar(LastWrite, SizeOf(LastWrite), 0);
+  H := Windows.FindFirstFile(PChar(FileName), FD);
+  if H = INVALID_HANDLE_VALUE then
+    Exit;
+  Windows.FindClose(H);
+  Int64Rec(Size).Lo := FD.nFileSizeLow;
+  Int64Rec(Size).Hi := FD.nFileSizeHigh;
+  LastWrite := FD.ftLastWriteTime;
+end;
+
+function SameFileSizeAndWriteTime(const FileName: string; const Size: Int64; const LastWrite: TFileTime): Boolean;
+var
+  CurSize: Int64;
+  CurLW: TFileTime;
+begin
+  Result := False;
+  if not FileExists(FileName) then
+    Exit;
+  GetFileSizeAndWriteTime(FileName, CurSize, CurLW);
+  Result := (CurSize = Size) and CompareMem(@CurLW, @LastWrite, SizeOf(TFileTime));
+end;
+
+function TryRenameTempOverTarget(const TempPath, TargetPath: string; out ErrMsg: string): Boolean;
+var
+  i: Integer;
+  LastErr: DWORD;
+  Bak: string;
+begin
+  Result := False;
+  ErrMsg := '';
+  if not FileExists(TempPath) then
+  begin
+    ErrMsg := TrText('Temporary output file was not created.');
+    Exit;
+  end;
+  if not ForceDeleteFile(TargetPath) then
+  begin
+    Bak := TargetPath + '.' + FormatDateTime('hhnnss', Now) + '.ffbak';
+    if not RenameFile(TargetPath, Bak) then
+    begin
+      ErrMsg := TrText('Could not remove or rename the target file (in use or access denied).');
+      ForceDeleteFile(TempPath);
+      Exit;
+    end;
+    Windows.DeleteFile(PChar(Bak));
+  end;
+  LastErr := 0;
+  for i := 1 to 120 do
+  begin
+    if RenameFile(TempPath, TargetPath) then
+    begin
+      Result := FileExists(TargetPath);
+      if not Result then
+      begin
+        ErrMsg := TrText('Rename reported success but target file is missing.');
+        if FileExists(TempPath) then
+          ForceDeleteFile(TempPath);
+      end;
+      Exit;
+    end;
+    LastErr := GetLastError;
+    Sleep(100);
+  end;
+  ErrMsg := Format(TrText('Could not finalize save (rename). Error %d: %s'), [LastErr, SysErrorMessage(LastErr)]);
+  ForceDeleteFile(TempPath);
+end;
+
+type
+  { Mesmo layout que ULARGE_INTEGER na API GetDiskFreeSpaceExA. }
+  TULargeIntegerRec = packed record
+    LowPart: LongWord;
+    HighPart: LongWord;
+  end;
+
+function UnKernelGetDiskFreeSpaceExA(lpDirectoryName: PChar;
+  lpFreeBytesAvailableToCaller, lpTotalNumberOfBytes, lpTotalNumberOfFreeBytes: Pointer): BOOL; stdcall;
+  external 'kernel32.dll' name 'GetDiskFreeSpaceExA';
+
+function VolumeHasMinFreeBytes(const AnyPathOnVolume: string; const MinFree: Int64): Boolean;
+var
+  Dir: string;
+  FreeU, TotalU, TFreeU: TULargeIntegerRec;
+  FreeBytes: Int64;
+begin
+  Result := True;
+  if MinFree <= 0 then
+    Exit;
+  Dir := ExtractFilePath(ExpandFileName(AnyPathOnVolume));
+  if Dir = '' then
+    Exit;
+  FillChar(FreeU, SizeOf(FreeU), 0);
+  FillChar(TotalU, SizeOf(TotalU), 0);
+  FillChar(TFreeU, SizeOf(TFreeU), 0);
+  { Evita conflito com varias declaracoes de GetDiskFreeSpaceEx no Windows.pas (Int64 vs PLargeInteger). }
+  if not UnKernelGetDiskFreeSpaceExA(PChar(Dir), @FreeU, @TotalU, @TFreeU) then
+    Exit;
+  FreeBytes := Int64(FreeU.LowPart) + (Int64(FreeU.HighPart) shl 32);
+  Result := FreeBytes >= MinFree;
 end;
 
 end.

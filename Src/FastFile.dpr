@@ -20,7 +20,10 @@ uses
   UnConsumerAI in 'UnConsumerAI.pas',
   UnConsumerDialog in 'UnConsumerDialog.pas',
   uSmoothLoading in 'uSmoothLoading.pas' {frmSmoothLoadingForm},
-  uDeltaEditor in 'uDeltaEditor.pas' {frmDeltaEditor};
+  uDeltaEditor in 'uDeltaEditor.pas' {frmDeltaEditor},
+  uFileSessionHistory in 'uFileSessionHistory.pas',
+  uLineDiffCore in 'uLineDiffCore.pas',
+  uCompareMergeUI in 'uCompareMergeUI.pas' {frmCompareMerge};
 
 const
   showDeveloperInfo: Boolean = True;

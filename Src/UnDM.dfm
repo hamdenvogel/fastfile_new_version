@@ -3431,10 +3431,10 @@ object DataModule1: TDataModule1
         OriginName = 'TV-b.asz'
       end>
     SkinDirectory = 
-      'C:\Hamden\Sistemas\Backend\delphi\delphi7\FastFile\Src-3-Alterna' +
-      'tiveVersion\Build\Skins'
-    SkinName = 'TV-b (internal)'
-    SkinInfo = '14.01'
+      'C:\Hamden\Sistemas\Backend\delphi\delphi7\FastFile\Components\Fi' +
+      'leReadThread-2\Src\Build\Skins'
+    SkinName = 'Notes Plastic'
+    SkinInfo = '15'
     ThirdParty.ThirdEdits = 
       'TEdit'#13#10'TMemo'#13#10'TMaskEdit'#13#10'TLabeledEdit'#13#10'THotKey'#13#10'TListBox'#13#10'TCheck' +
       'ListBox'#13#10'TDBListBox'#13#10'TRichEdit'#13#10'TDBMemo'#13#10'TSynEdit'#13#10'TSynMemo'#13#10'TDB' +

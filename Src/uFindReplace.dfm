@@ -90,7 +90,7 @@ object frmFindReplace: TfrmFindReplace
     Top = 180
     Width = 95
     Height = 30
-    Caption = 'Find Next'
+    Caption = 'Find &Next'
     Default = True
     TabOrder = 4
     OnClick = btnFindNextClick
@@ -100,7 +100,7 @@ object frmFindReplace: TfrmFindReplace
     Top = 180
     Width = 95
     Height = 30
-    Caption = 'Replace'
+    Caption = '&Replace'
     TabOrder = 5
     OnClick = btnReplaceClick
   end
@@ -109,7 +109,7 @@ object frmFindReplace: TfrmFindReplace
     Top = 180
     Width = 95
     Height = 30
-    Caption = 'Replace All'
+    Caption = 'Replace A&ll'
     TabOrder = 6
     OnClick = btnReplaceAllClick
   end
@@ -119,7 +119,7 @@ object frmFindReplace: TfrmFindReplace
     Width = 95
     Height = 30
     Cancel = True
-    Caption = 'Close'
+    Caption = '&Close'
     TabOrder = 7
     OnClick = btnCloseClick
   end

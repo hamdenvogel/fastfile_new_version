@@ -34,6 +34,8 @@ type
     FFadeEndAlpha: Byte;
     procedure BuildBackground;
     procedure WMEraseBkgnd(var Msg: TWMEraseBkgnd); message WM_ERASEBKGND;
+    procedure ApplySmoothProgress(Percent: Integer);
+    procedure WMSmoothProgress(var Msg: TMessage); message WM_APP + 77;
     procedure CenterContainer;
     procedure RoundControl(Control: TWinControl; Radius: Integer);
     procedure LoadLogo;
@@ -1555,6 +1557,32 @@ begin
   Msg.Result := 1;
 end;
 
+procedure TfrmSmoothLoadingForm.ApplySmoothProgress(Percent: Integer);
+var
+  R: TRect;
+begin
+  FIsDeterminate := True;
+  if Percent > 100 then Percent := 100;
+  if Percent < 0 then Percent := 0;
+  FTargetProgress := Percent;
+  FCurrentProgress := Percent;
+  FLastPaintedProgress := Percent;
+  pbProgressBar.Repaint;
+  if Assigned(pnlContainer) then
+  begin
+    R := pbProgressBar.BoundsRect;
+    OffsetRect(R, pnlContainer.Left, pnlContainer.Top);
+    InvalidateRect(Handle, @R, False);
+    UpdateWindow(Handle);
+  end;
+end;
+
+procedure TfrmSmoothLoadingForm.WMSmoothProgress(var Msg: TMessage);
+begin
+  ApplySmoothProgress(Msg.WParam);
+  Msg.Result := 0;
+end;
+
 procedure TfrmSmoothLoadingForm.BuildBackground;
 var
   Row: Integer;
@@ -1616,7 +1644,9 @@ begin
   frmSmoothLoading.AlphaBlendValue := frmSmoothLoading.FFadeStartAlpha;
   frmSmoothLoading.FFadeInActive := True;
   frmSmoothLoading.FFadeStartTick := GetTickCount;
-frmSmoothLoading.FIsDeterminate := False;
+  { Ver comentário em uSmoothLoading.pas ShowLoading: evita barra cheia
+    antes do primeiro UpdateProgress (timer 15 ms + modo indeterminado). }
+  frmSmoothLoading.FIsDeterminate := True;
   frmSmoothLoading.FCurrentProgress := 0;
   frmSmoothLoading.FTargetProgress := 0;
   frmSmoothLoading.lblMessage.Caption := MessageText;
@@ -1675,25 +1705,27 @@ begin
       FCurrentProgress := FCurrentProgress + (FTargetProgress - FCurrentProgress) * 0.15;
   end;
 
-  // Redesenha só quando necessário (evita flicker)
-  if Abs(FLastPaintedProgress - FCurrentProgress) > 0.2 then
+  if (not FIsDeterminate) or (Abs(FCurrentProgress - FTargetProgress) > 0.1) then
   begin
-    FLastPaintedProgress := FCurrentProgress;
-    pbProgressBar.Invalidate;
+    if Abs(FLastPaintedProgress - FCurrentProgress) > 0.2 then
+    begin
+      FLastPaintedProgress := FCurrentProgress;
+      pbProgressBar.Invalidate;
+    end;
+    if not FIsDeterminate then
+      pbProgressBar.Invalidate;
   end;
-
-  pbProgressBar.Invalidate;
 end;
 
 class procedure TfrmSmoothLoading.UpdateProgress(Percent: Integer);
 begin
-  if Assigned(frmSmoothLoading) then
-  begin
-    frmSmoothLoading.FIsDeterminate := True;
-    if Percent > 100 then Percent := 100;
-    if Percent < 0 then Percent := 0;
-    frmSmoothLoading.FTargetProgress := Percent;
-  end;
+  if not Assigned(frmSmoothLoading) then Exit;
+  if Percent > 100 then Percent := 100;
+  if Percent < 0 then Percent := 0;
+  if GetCurrentThreadId = MainThreadID then
+    frmSmoothLoading.ApplySmoothProgress(Percent)
+  else if frmSmoothLoading.HandleAllocated then
+    SendMessage(frmSmoothLoading.Handle, WM_APP + 77, WPARAM(Percent), 0);
 end;
 
 procedure TfrmSmoothLoadingForm.FormPaint(Sender: TObject);

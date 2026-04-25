@@ -4,7 +4,7 @@ interface
 
 const
   APPLICATION_NAME = 'FastFile';
-  APPLICATION_VERSION = '2.1.6.36';
+  APPLICATION_VERSION = '2.1.6.68';
   APPLICATION_FULLNAME = 'FastFile editor';
   APPLICATION_DEVELOPER = 'Copyright (c) 2025 - 2026, Hamden Vogel.' + #13#10 + 'All rights reserved.';
   ASKIN_INI = 'ASkin.ini';
@@ -46,3 +46,4 @@ const
 implementation
 
 end.
+

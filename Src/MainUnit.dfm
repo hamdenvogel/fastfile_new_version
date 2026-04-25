@@ -3092,7 +3092,7 @@ object frmMain: TfrmMain
       Caption = 'Read File'
       object sSplitter1: TsSplitter
         Left = 0
-        Top = 138
+        Top = 158
         Width = 1330
         Height = -1
         Cursor = crVSplit
@@ -3368,9 +3368,9 @@ object frmMain: TfrmMain
       end
       object pnlMain: TsPanel
         Left = 0
-        Top = 137
+        Top = 157
         Width = 1330
-        Height = 398
+        Height = 378
         Align = alClient
         BevelOuter = bvNone
         DoubleBuffered = False
@@ -3379,13 +3379,13 @@ object frmMain: TfrmMain
           Left = 1311
           Top = 0
           Width = 2
-          Height = 379
+          Height = 359
           Align = alRight
           Visible = False
         end
         object sSplitter12: TsSplitter
           Left = 0
-          Top = 396
+          Top = 376
           Width = 1330
           Height = 2
           Cursor = crVSplit
@@ -3396,7 +3396,7 @@ object frmMain: TfrmMain
           Left = 0
           Top = 0
           Width = 1311
-          Height = 379
+          Height = 359
           Align = alClient
           DoubleBuffered = False
           TabOrder = 0
@@ -3508,7 +3508,7 @@ object frmMain: TfrmMain
             Left = 1
             Top = 1
             Width = 1309
-            Height = 377
+            Height = 357
             Align = alClient
             Columns = <
               item
@@ -3545,7 +3545,7 @@ object frmMain: TfrmMain
           Left = 1313
           Top = 0
           Width = 17
-          Height = 379
+          Height = 359
           Align = alRight
           Kind = sbVertical
           PageSize = 0
@@ -3555,7 +3555,7 @@ object frmMain: TfrmMain
         end
         object ScrollBarHorizontal: TScrollBar
           Left = 0
-          Top = 379
+          Top = 359
           Width = 1330
           Height = 17
           Align = alBottom
@@ -3569,7 +3569,7 @@ object frmMain: TfrmMain
         Left = 0
         Top = 50
         Width = 1330
-        Height = 88
+        Height = 108
         ActivePage = sTabSheet5
         Align = alTop
         HotTrack = True
@@ -3599,7 +3599,7 @@ object frmMain: TfrmMain
             Left = 0
             Top = 0
             Width = 1322
-            Height = 52
+            Height = 72
             SkinData.SkinSection = 'TRANSPARENT'
             Align = alClient
             DoubleBuffered = True
@@ -3611,7 +3611,7 @@ object frmMain: TfrmMain
               Left = 0
               Top = 0
               Width = 1700
-              Height = 52
+              Height = 72
               SkinData.SkinSection = 'TRANSPARENT'
               BevelOuter = bvNone
               DoubleBuffered = False
@@ -3620,7 +3620,7 @@ object frmMain: TfrmMain
                 Left = 7
                 Top = 0
                 Width = 4
-                Height = 52
+                Height = 72
                 ParentShowHint = False
                 ShowHint = False
                 Align = alLeft
@@ -3630,7 +3630,7 @@ object frmMain: TfrmMain
                 Left = 11
                 Top = 0
                 Width = 90
-                Height = 52
+                Height = 72
                 AllowAllUp = True
                 GroupIndex = 1
                 Caption = 'Read'#13#10'F5'
@@ -3648,7 +3648,7 @@ object frmMain: TfrmMain
                 Left = 526
                 Top = 0
                 Width = 120
-                Height = 52
+                Height = 72
                 AllowAllUp = True
                 GroupIndex = 1
                 Caption = 'Clear'#13#10'Ctrl+Shift+X'
@@ -3666,7 +3666,7 @@ object frmMain: TfrmMain
                 Left = 766
                 Top = 0
                 Width = 120
-                Height = 52
+                Height = 72
                 AllowAllUp = True
                 GroupIndex = 1
                 Caption = 'Delete lines'#13#10'Ctrl+Shift+D'
@@ -3686,7 +3686,7 @@ object frmMain: TfrmMain
                 Left = 166
                 Top = 0
                 Width = 120
-                Height = 52
+                Height = 72
                 AllowAllUp = True
                 GroupIndex = 1
                 Caption = 'Split Files'#13#10'Ctrl+Shift+K'
@@ -3705,7 +3705,7 @@ object frmMain: TfrmMain
                 Left = 286
                 Top = 0
                 Width = 120
-                Height = 52
+                Height = 72
                 Hint = 
                   'Edit line replacements (.delta) and merge into the current file ' +
                   '(ReadFileThread). Saves a .delta next to the app and runs merge ' +
@@ -3730,7 +3730,7 @@ object frmMain: TfrmMain
                 Left = 646
                 Top = 0
                 Width = 120
-                Height = 52
+                Height = 72
                 AllowAllUp = True
                 GroupIndex = 1
                 Caption = 'Edit'#13#10'Ctrl+Shift+I'
@@ -3749,7 +3749,7 @@ object frmMain: TfrmMain
                 Left = 406
                 Top = 0
                 Width = 120
-                Height = 52
+                Height = 72
                 AllowAllUp = True
                 GroupIndex = 1
                 Caption = 'Select'#13#10'Ctrl+Shift+S'
@@ -3768,7 +3768,7 @@ object frmMain: TfrmMain
                 Left = 886
                 Top = 0
                 Width = 120
-                Height = 52
+                Height = 72
                 AllowAllUp = True
                 GroupIndex = 1
                 Caption = 'Export'#13#10'Ctrl+Shift+O'
@@ -3787,7 +3787,7 @@ object frmMain: TfrmMain
                 Left = 1006
                 Top = 0
                 Width = 120
-                Height = 52
+                Height = 72
                 AllowAllUp = True
                 GroupIndex = 1
                 Caption = 'Close'#13#10'Ctrl+Shift+W'
@@ -3806,7 +3806,7 @@ object frmMain: TfrmMain
                 Left = 1126
                 Top = 0
                 Width = 120
-                Height = 52
+                Height = 72
                 AllowAllUp = True
                 GroupIndex = 1
                 Caption = 'AI'#13#10'Ctrl+Shift+A'
@@ -3824,7 +3824,7 @@ object frmMain: TfrmMain
                 Left = 1246
                 Top = 0
                 Width = 120
-                Height = 52
+                Height = 72
                 AllowAllUp = True
                 GroupIndex = 1
                 Caption = 'Help'#13#10'F1'
@@ -3842,7 +3842,7 @@ object frmMain: TfrmMain
                 Left = 0
                 Top = 0
                 Width = 7
-                Height = 52
+                Height = 72
                 SkinData.SkinSection = 'GRIPH'
                 Align = alLeft
                 DoubleBuffered = False
@@ -3854,7 +3854,7 @@ object frmMain: TfrmMain
                 Left = 101
                 Top = 0
                 Width = 65
-                Height = 52
+                Height = 72
                 Align = alLeft
                 DoubleBuffered = False
                 TabOrder = 1
@@ -3863,7 +3863,7 @@ object frmMain: TfrmMain
                   Left = 1
                   Top = 1
                   Width = 63
-                  Height = 50
+                  Height = 70
                   Align = alClient
                   BevelOuter = bvNone
                   Color = clWhite
@@ -3872,7 +3872,7 @@ object frmMain: TfrmMain
                     Left = 0
                     Top = 0
                     Width = 63
-                    Height = 50
+                    Height = 70
                     Align = alClient
                     Center = True
                     Stretch = True
@@ -3880,23 +3880,63 @@ object frmMain: TfrmMain
                   end
                 end
               end
-              object chkWordWrap: TCheckBox
-                Left = 1116
-                Top = 11
-                Width = 147
-                Height = 25
-                Hint = 'Toggle Word Wrap (Ctrl+W)'
-                Caption = 'Word Wrap (ON)'
-                Font.Charset = DEFAULT_CHARSET
-                Font.Color = clWindowText
-                Font.Height = -11
-                Font.Name = 'Tahoma'
-                Font.Style = [fsBold]
-                ParentFont = False
-                ParentShowHint = False
-                ShowHint = True
+              object pnlReadToolbarOptions: TsPanel
+                Left = 1366
+                Top = 0
+                Width = 334
+                Height = 72
+                SkinData.SkinSection = 'TRANSPARENT'
+                Align = alClient
+                BevelOuter = bvNone
+                DoubleBuffered = False
                 TabOrder = 2
-                OnClick = chkWordWrapClick
+                DesignSize = (
+                  334
+                  72)
+                object chkWordWrap: TCheckBox
+                  Left = 6
+                  Top = 4
+                  Width = 318
+                  Height = 22
+                  Hint = 'Toggle Word Wrap (Ctrl+W)'
+                  Anchors = [akLeft, akTop, akRight]
+                  Caption = 'Word Wrap (ON)'
+                  Font.Charset = DEFAULT_CHARSET
+                  Font.Color = clWindowText
+                  Font.Height = -11
+                  Font.Name = 'Tahoma'
+                  Font.Style = [fsBold]
+                  ParentFont = False
+                  ParentShowHint = False
+                  ShowHint = True
+                  TabOrder = 0
+                  OnClick = chkWordWrapClick
+                end
+                object chkSegmentedHeavyOps: TsCheckBox
+                  Left = 6
+                  Top = 28
+                  Width = 318
+                  Height = 38
+                  Hint = 
+                    'When enabled, Replace All may process the file in line-aligned s' +
+                    'egments (temp parts), then merge. May reduce peak memory on very' +
+                    ' large files. Matches that span a segment boundary may be missed' +
+                    '.'
+                  Caption = 'Line-segmented processing for heavy operations (off by default)'
+                  Anchors = [akLeft, akTop, akRight, akBottom]
+                  AutoSize = False
+                  Font.Charset = DEFAULT_CHARSET
+                  Font.Color = clWindowText
+                  Font.Height = -11
+                  Font.Name = 'Tahoma'
+                  Font.Style = []
+                  ParentFont = False
+                  ParentShowHint = False
+                  ShowHint = True
+                  TabOrder = 1
+                  OnClick = chkSegmentedHeavyOpsClick
+                  WordWrap = True
+                end
               end
             end
           end
@@ -5471,10 +5511,6 @@ object frmMain: TfrmMain
           GroupIndex = 1
         end
       end
-      object Allowanimation2: TMenuItem
-        Action = ActionAnimation
-        GroupIndex = 1
-      end
       object Enabled1: TMenuItem
         Action = ActionEnabled
         GroupIndex = 1
@@ -5563,10 +5599,6 @@ object frmMain: TfrmMain
         GroupIndex = 1
       end
     end
-    object Allowanimation1: TMenuItem
-      Action = ActionAnimation
-      GroupIndex = 1
-    end
     object Enabled2: TMenuItem
       Action = ActionEnabled
       GroupIndex = 1
@@ -5595,10 +5627,6 @@ object frmMain: TfrmMain
       Checked = True
       GroupIndex = 1
       OnClick = mnShowHintsClick
-    end
-    object mnChangeBidiMode: TMenuItem
-      Caption = 'Change BidiMode'
-      GroupIndex = 1
     end
     object N6: TMenuItem
       Caption = '-'
@@ -8072,10 +8100,6 @@ object frmMain: TfrmMain
     object M1: TMenuItem
       Caption = 'Magnifier'
       OnClick = M1Click
-    end
-    object C2: TMenuItem
-      Caption = 'Change BidiMode'
-      OnClick = C2Click
     end
     object C1: TMenuItem
       Caption = 'Calculator'

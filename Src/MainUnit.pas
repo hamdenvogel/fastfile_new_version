@@ -30,6 +30,9 @@ type
 type
   TMergeFilesMode = (mfmBeginning, mfmAfterLine, mfmEnd, mfmLineRange);
 
+type                                                                                    
+  TFilterMatchMode = (fmmContains, fmmPrefix, fmmRegex);
+
 type
   tpPositionStream = (psMiddleOfFile,psEndOfFile);
 type
@@ -58,7 +61,7 @@ const
   CheckHeight: Word = 14; {Height of checkmark}
   CheckBiasTop: Word = 2; {This aligns the checkbox to be in centered}
   CheckBiasLeft: Word = 3; {In the row of the list item display}
-  MAX_LINE_LEN_DISPLAY = 2 * 1024 * 1024; // 2 MB por linha (evita out of memory se indice estiver errado)
+  MAX_LINE_LEN_DISPLAY = 256 * 1024; // 256 KB por linha na vista (linhas enormes nao travam a UI)
 
   { Windows Language ID constants (Delphi 7 compatibility) }
   LANG_PORTUGUESE = $16;
@@ -220,8 +223,6 @@ type
     Hintsshowing1: TMenuItem;
     Builtinskins1: TMenuItem;
     Externalskins1: TMenuItem;
-    Allowanimation1: TMenuItem;
-    Allowanimation2: TMenuItem;
     Standarddlgsamples1: TMenuItem;
     miSelectSkindialog1: TMenuItem;
 
@@ -306,7 +307,6 @@ type
     N2: TMenuItem;
     mnSelectSkin: TMenuItem;
     mnRandomSkin: TMenuItem;
-    mnChangeBidiMode: TMenuItem;
     N6: TMenuItem;
     mnShowHints: TMenuItem;
     N7: TMenuItem;
@@ -345,7 +345,6 @@ type
     sSpeedButton16: TsSpeedButton;
     R1: TMenuItem;
     M1: TMenuItem;
-    C2: TMenuItem;
     Button1: TButton;
     Button2: TButton;
     tabExportedLines: TsTabSheet;
@@ -587,7 +586,9 @@ type
     ScrollBarHorizontal: TScrollBar;
     SaveDialog1: TSaveDialog;
     tmrTail: TTimer;
+    pnlReadToolbarOptions: TsPanel;
     chkWordWrap: TCheckBox;
+    chkSegmentedHeavyOps: TsCheckBox;
     comboViewEncoding: TComboBox;
     comboZoom: TComboBox;
     comboLanguage: TComboBox;
@@ -660,6 +661,7 @@ type
     procedure mnShowHintsClick(Sender: TObject);
     procedure btnReturnReadClick(Sender: TObject);
     procedure chkWordWrapClick(Sender: TObject);
+    procedure chkSegmentedHeavyOpsClick(Sender: TObject);
     procedure comboViewEncodingChange(Sender: TObject);
     procedure comboZoomChange(Sender: TObject);
     procedure comboLanguageChange(Sender: TObject);
@@ -704,7 +706,6 @@ type
     function CheckListBoxWordWrapTextRect(CLB: TCheckListBox; const ItemRect: TRect): TRect;
     procedure R1Click(Sender: TObject);
     procedure M1Click(Sender: TObject);
-    procedure C2Click(Sender: TObject);
     procedure btnReturnClick(Sender: TObject);
     procedure Button1Click(Sender: TObject);
     procedure btnReadClick(Sender: TObject);
@@ -871,6 +872,24 @@ type
 
     { Encoding Detection }
     FDetectedEncoding: String;
+    { Modo somente leitura (sessao): bloqueia escrita no ficheiro aberto na aba Read. }
+    FFileSessionReadOnly: Boolean;
+    FMenuReadOnlyItem: TMenuItem;
+    FPopupLVReadOnlyItem: TMenuItem;
+    FMenuSegmentedHeavyOpsItem: TMenuItem;
+    FPopupLVSegmentedHeavyOpsItem: TMenuItem;
+    { Itens extra no Tools (title bar / PopupMenu1), antes do separador final. }
+    FToolsExtrasSep: TMenuItem;
+    FToolsExtrasWordWrap: TMenuItem;
+    FToolsExtrasReadOnly: TMenuItem;
+    FToolsExtrasSegmented: TMenuItem;
+    FToolsExtrasTail: TMenuItem;
+    FToolsExtrasFilter: TMenuItem;
+    FToolsExtrasExportFiltered: TMenuItem;
+    FToolsExtrasToggleBookmark: TMenuItem;
+    FToolsExtrasNextBookmark: TMenuItem;
+    FToolsExtrasPrevBookmark: TMenuItem;
+    FToolsExtrasClearBookmarks: TMenuItem;
     FUpdatingViewEncodingCombo: Boolean;
     FUpdatingLanguageCombo: Boolean;
     FApplyingLanguage: Boolean;
@@ -954,6 +973,11 @@ type
     FDeferredListViewRecreateForRowHeight: Boolean;
     { Evita enfileirar refreshes duplicados da checklist (Ctrl+W / word-wrap no modo Select). }
     FChecklistRefreshPending: Boolean;
+    { Snapshot do ficheiro no disco apos leitura (detetar alteracao externa antes de gravar). }
+    FOpenDiskSnapValid: Boolean;
+    FOpenDiskSnapPath: string;
+    FOpenDiskSnapSize: Int64;
+    FOpenDiskSnapWrite: TFileTime;
 
     { Cached popup menu items for ListView context menu state sync. }
     FPopupLVSelectItem: TMenuItem;
@@ -1002,6 +1026,10 @@ type
     procedure LocalizeMenuItem(const AComponentName, ATranslationKey, ADefaultCaption: string);
     procedure LocalizeTopToolbar;
     procedure BuildMenuBitmapImageList;
+    procedure ApplySkinRelatedPopupMenuIcons;
+    procedure EnsureToolsPopupFastFileExtras;
+    procedure EnsureToolsPopupBookmarkExtras;
+    procedure UpdateToolsPopupFastFileExtrasCaptions;
     function ResolveMenuBitmapDir: string;
     function MenuIconIndex(const AFileName: string; const AFallbackIndex: Integer = -1): Integer;
     procedure EnsureConsumerAIPanel;
@@ -1052,8 +1080,10 @@ type
     procedure UpdateInfoPanels;
     procedure UpdateListViewZoomStatusPanel;
     procedure ExecutePanelIndexOne;
+    function BuildLoadedFileDetailsText: string;
     // Logic to generate the modal form dynamically
     procedure ShowDetailsPopup(const TextContent: string);    
+    procedure DetailsPopupKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     // Event handler for the dynamic "Copy" button
     procedure OnDynamicCopyClick(Sender: TObject);
     { Atalhos do painel Read (F1 Help + FormKeyDown + modo Select com checklist). }
@@ -1067,9 +1097,17 @@ type
     procedure DoFindDialog;
     procedure DoFindReplace;
     procedure DoGotoLine;
+    procedure DoGotoByteOffset;
+    function Line0BasedForFileByte1Based(const Byte1Based: Int64): Int64;
     procedure StartFindFromPos(const AStartPos: Int64; const ADirection: Integer);
     procedure FindThreadDone(const AFound: Boolean; const ALineIndex: Integer; const AFilePos: Int64; const ASearchId: Integer; const AErrorMsg: string);
-    function GetLineStartOffset(LineIndex: Integer): Int64;
+    procedure UpdateFindSearchProgress(const BytesDone, TotalBytes: Int64);
+    procedure CaptureOpenFileDiskSnapshot;
+    procedure InvalidateOpenFileDiskSnapshot;
+    function EnsureOpenFileNotStaleForMutate: Boolean;
+    function EnsureWritableSession: Boolean;
+    procedure ApplySessionReadOnlyUi;
+    function GetLineStartOffset(LineIndex: Int64): Int64;
     function BlendColors(const BaseColor, OverlayColor: TColor; const Alpha: Byte): TColor;
     function WrapLongTokensForDisplay(const AText: string; const MaxChars: Integer): string;
     { Quebra texto por largura em pixels (owner-draw onde DT_WORDBREAK falha). }
@@ -1100,9 +1138,12 @@ type
 
     { Filter / Grep Visual }
     procedure DoFilterDialog;
-    procedure StartFilter(const AText: String; ACaseSensitive: Boolean);
+    procedure StartFilter(const AText: String; ACaseSensitive: Boolean;
+      const AMatchMode: TFilterMatchMode = fmmContains);
     procedure ClearFilter;
     procedure FilterThreadDone;
+    procedure FinishFilterThreadFailed(const AMsg: string);
+    procedure UpdateFilterBuildProgress(const LinesDone, TotalLines: Int64);
     function FilteredIndexToReal(FilteredIdx: Int64): Int64;
     function FilteredIndexForRealLine(const RealLine: Int64): Int64;
     procedure SyncScrollBarsForFilterMode;
@@ -1128,6 +1169,7 @@ type
     procedure miFindClick(Sender: TObject);
     procedure miFindReplaceClick(Sender: TObject);
     procedure miGotoLineClick(Sender: TObject);
+    procedure miGotoByteOffsetClick(Sender: TObject);
     procedure miUndoClick(Sender: TObject);
     procedure miRedoClick(Sender: TObject);
     procedure miCopyClick(Sender: TObject);
@@ -1141,12 +1183,18 @@ type
     procedure miNextBookmarkClick(Sender: TObject);
     procedure miPrevBookmarkClick(Sender: TObject);
     procedure miClearBookmarksClick(Sender: TObject);
+    procedure miToggleReadOnlyClick(Sender: TObject);
+    procedure miToggleSegmentedHeavyOpsClick(Sender: TObject);
     procedure miSelectClick(Sender: TObject);
+    procedure miZoomListViewInClick(Sender: TObject);
+    procedure miZoomListViewOutClick(Sender: TObject);
     procedure miSplitFilesClick(Sender: TObject);
     procedure miMergeLinesClick(Sender: TObject);
     procedure miMergeFilesClick(Sender: TObject);
+    procedure miCompareMergeHistoryClick(Sender: TObject);
     procedure miFindInFilesClick(Sender: TObject);
     procedure miInsertLineClick(Sender: TObject);
+    procedure miDuplicateLineClick(Sender: TObject);
     procedure miEditLineClick(Sender: TObject);
     procedure miDeleteLinesClick(Sender: TObject);
     procedure miExportClick(Sender: TObject);
@@ -1159,6 +1207,9 @@ type
     function ShowMergeFilesDialog(out ASourceFile: String;
       out AMergeMode: TMergeFilesMode; out ALineNumber: Int64;
       out AFromLine: Int64; out AToLine: Int64): Boolean;
+    function ShowSplitEqualPartsDialog(out ASourceFile: String;
+      out APartCount: Integer): Boolean;
+    procedure miSplitEqualPartsClick(Sender: TObject);
     function TryGetLineStartOffset(const ALine1Based: Int64;
       out AOffset0Based: Int64): Boolean;
 
@@ -1288,9 +1339,18 @@ implementation
 uses
   sMaskData, sStyleSimply, sSkinProps, sMessages, sStoreUtils, sGraphUtils, acPopupController,
   sVclUtils, acntUtils, sConst, acSelectSkin, sCommonData, sSkinMenus, sCalculator, UnitPopupScaling,
-  acAnimation, UnUtils, StrUtils, UnDM, UnSplash, UnFormAboutFF, Biblioteca, uTextEncoding, uI18n;
+  acAnimation, UnUtils, StrUtils, UnDM, UnSplash, UnFormAboutFF, Biblioteca, uTextEncoding, uI18n,
+  ComObj, ActiveX, uCompareMergeUI;
 
 {$R *.DFM}
+
+const
+  { Glifo de zoom da lista: mesmo que ImageList1 (design-time), p.ex. índice 91 (lupa). }
+  IMAGELIST_IDX_ZOOM_LIST = 91;
+  FF_MENU_BMP_ZOOM_LIST = '__ff_zoom_list.bmp';
+  { Fundo e barra de realce para linhas com marcador (ListView + checklist). }
+  FF_BOOKMARK_ROW_BG = $00F0FAFF;
+  FF_BOOKMARK_STRIPE = $0058B4FF;
 
 procedure ShowMessage(const Msg: string); overload;
 begin
@@ -1301,6 +1361,20 @@ function MessageDlg(const Msg: string; DlgType: TMsgDlgType;
   Buttons: TMsgDlgButtons; HelpCtx: Longint): Integer; overload;
 begin
   Result := Dialogs.MessageDlg(TrText(Msg), DlgType, Buttons, HelpCtx);
+end;
+
+procedure TfrmMain.chkSegmentedHeavyOpsClick(Sender: TObject);
+var
+  Chk: Boolean;
+begin
+  Chk := Assigned(chkSegmentedHeavyOps) and chkSegmentedHeavyOps.Checked;
+  sStoreUtils.WriteIniStr(APPLICATION_NAME, 'SegmentHeavyOps', iff(Chk, '1', '0'), IniName);
+  if Assigned(FMenuSegmentedHeavyOpsItem) then
+    FMenuSegmentedHeavyOpsItem.Checked := Chk;
+  if Assigned(FPopupLVSegmentedHeavyOpsItem) then
+    FPopupLVSegmentedHeavyOpsItem.Checked := Chk;
+  if Assigned(FToolsExtrasSegmented) then
+    FToolsExtrasSegmented.Checked := Chk;
 end;
 
 procedure TfrmMain.chkWordWrapClick(Sender: TObject);
@@ -1327,6 +1401,8 @@ begin
     ListView1.Invalidate;
   end;
   SyncScrollBarsForFilterMode;
+  if Assigned(FToolsExtrasWordWrap) then
+    FToolsExtrasWordWrap.Checked := Assigned(chkWordWrap) and chkWordWrap.Checked;
 end;
 
 function TfrmMain.EffectiveDisplayEncoding: string;
@@ -1398,7 +1474,11 @@ type
     FFoundPos: Int64;
     FSearchId: Integer;
     FErrorMsg: string;
+    FLastFindProgressPos: Int64;
+    FProgBytes: Int64;
+    FProgTotal: Int64;
     procedure NotifyOwner;
+    procedure SyncFindBytesProgress;
     function OffsetToLineIndex(AIndexStream: TFileStream; const APos1Based: Int64): Integer;
   protected
     procedure Execute; override;
@@ -1415,17 +1495,24 @@ type
     FIndexFileName: string;
     FNeedle: AnsiString;
     FCaseSensitive: Boolean;
+    FMatchMode: TFilterMatchMode;
     FTotalLines: Int64;
     FBits: PFFByteArray;
     FBitsSize: Integer;
     FFilteredCount: Int64;
     FJumpTable: TInt64DynArray;
+    FProgLines: Int64;
+    FProgTotalLines: Int64;
+    FAbortMsg: string;
     procedure NotifyOwner;
+    procedure SyncFilterProgress;
+    procedure SyncFilterFailed;
   protected
     procedure Execute; override;
   public
     constructor Create(AOwner: TfrmMain; const AFileName, AIndexFileName: string;
-      const ANeedle: string; ACaseSensitive: Boolean; ATotalLines: Int64);
+      const ANeedle: string; ACaseSensitive: Boolean; ATotalLines: Int64;
+      AMatchMode: TFilterMatchMode);
     destructor Destroy; override;
   end;
 
@@ -1601,22 +1688,28 @@ begin
     btnClose.Caption := Tr('toolbar.close', 'Close');
   if Assigned(chkWordWrap) then
     chkWordWrap.Caption := Tr('toolbar.word_wrap_on', 'Word Wrap (ON)');
+  if Assigned(chkSegmentedHeavyOps) then
+  begin
+    chkSegmentedHeavyOps.Caption := TrText('Line-segmented processing for heavy operations (off by default)');
+    chkSegmentedHeavyOps.Hint := TrText(
+      'When enabled, Replace All and batch delete of checked lines may process the file in line-aligned segments (temporary parts), then merge. Can reduce peak memory on very large files. Replace All: search text that spans a segment boundary may not match.');
+  end;
   { TsTitleBar: About and Tools items }
   if Assigned(sTitleBar1) and (sTitleBar1.Items.Count > 1) then
   begin
     sTitleBar1.Items[0].Caption := Tr('titlebar.about', 'About');
     sTitleBar1.Items[1].Caption := Tr('titlebar.tools', 'Tools');
   end;
+  if Assigned(sSkinProvider1) then
+    sSkinProvider1.SysSubMenu.Caption := TrText('Dialogs');
   { PopupMenu1 items (Tools dropdown) — direct field access, sem FindComponent. }
   if Assigned(mnSelectSkin)     then mnSelectSkin.Caption     := Tr('popup.select_skin',       'Select Skin');
   if Assigned(mnRandomSkin)     then mnRandomSkin.Caption     := Tr('popup.random_skin',       'Random Skin');
   if Assigned(mnShowHints)      then mnShowHints.Caption      := Tr('popup.show_hints',        'Show Hints');
-  if Assigned(mnChangeBidiMode) then mnChangeBidiMode.Caption := Tr('popup.change_bidimode',   'Change BidiMode');
   { PopupDialogs items — direct field access. }
   if Assigned(miSelectSkindialog1) then miSelectSkindialog1.Caption := Tr('popup.selectskin_dialog', 'SelectSkin dialog');
   if Assigned(R1) then R1.Caption := Tr('popup.random_skin',    'Random Skin');
   if Assigned(M1) then M1.Caption := Tr('popup.magnifier',      'Magnifier');
-  if Assigned(C2) then C2.Caption := Tr('popup.change_bidimode','Change BidiMode');
   if Assigned(C1) then C1.Caption := Tr('popup.calculator',     'Calculator');
   { Status bar controls }
   if Assigned(SpeedBtnPPI)    then SpeedBtnPPI.Caption               := TrText('Change scaling');
@@ -1790,6 +1883,8 @@ var
   SearchRec: TSearchRec;
   Bmp: TBitmap;
   SizedBmp: TBitmap;
+  ZoomSrc: TBitmap;
+  ZoomSized: TBitmap;
   FileNames: TStringList;
   I: Integer;
   FilePath: string;
@@ -1868,8 +1963,193 @@ begin
     FileNames.Free;
   end;
 
+  { Ícone de zoom da lista: copia ImageList1[IMAGELIST_IDX_ZOOM_LIST] para FMenuBitmapImages
+    (o menu usa esta lista, não ImageList1 diretamente). }
+  if Assigned(ImageList1) and (ImageList1.Count > IMAGELIST_IDX_ZOOM_LIST) then
+  begin
+    ZoomSrc := TBitmap.Create;
+    ZoomSized := TBitmap.Create;
+    try
+      ZoomSrc.Width := ImageList1.Width;
+      ZoomSrc.Height := ImageList1.Height;
+      ZoomSrc.PixelFormat := pf24bit;
+      ZoomSrc.Canvas.Brush.Color := clFuchsia;
+      ZoomSrc.Canvas.FillRect(Rect(0, 0, ZoomSrc.Width, ZoomSrc.Height));
+      ImageList1.Draw(ZoomSrc.Canvas, 0, 0, IMAGELIST_IDX_ZOOM_LIST);
+      ZoomSized.PixelFormat := pf24bit;
+      ZoomSized.Width := FMenuBitmapImages.Width;
+      ZoomSized.Height := FMenuBitmapImages.Height;
+      ZoomSized.Canvas.Brush.Color := clFuchsia;
+      ZoomSized.Canvas.FillRect(Rect(0, 0, ZoomSized.Width, ZoomSized.Height));
+      SetStretchBltMode(ZoomSized.Canvas.Handle, HALFTONE);
+      StretchBlt(
+        ZoomSized.Canvas.Handle,
+        0, 0, ZoomSized.Width, ZoomSized.Height,
+        ZoomSrc.Canvas.Handle,
+        0, 0, ZoomSrc.Width, ZoomSrc.Height,
+        SRCCOPY
+      );
+      FMenuBitmapImages.AddMasked(ZoomSized, clFuchsia);
+      FMenuIconIndexByName.Values[LowerCase(FF_MENU_BMP_ZOOM_LIST)] :=
+        IntToStr(FMenuBitmapImages.Count - 1);
+    finally
+      ZoomSized.Free;
+      ZoomSrc.Free;
+    end;
+  end;
+
   MainMenu1.Images := FMenuBitmapImages;
   popupmenuListView.Images := FMenuBitmapImages;
+  if Assigned(PopupMenu1) then
+  begin
+    if FMenuBitmapImages.Count > 0 then
+      PopupMenu1.Images := FMenuBitmapImages
+    else
+      PopupMenu1.Images := CharImageList16;
+  end;
+  if Assigned(PopupDialogs) then
+  begin
+    if FMenuBitmapImages.Count > 0 then
+      PopupDialogs.Images := FMenuBitmapImages
+    else
+      PopupDialogs.Images := CharImageList16;
+  end;
+  ApplySkinRelatedPopupMenuIcons;
+end;
+
+procedure TfrmMain.ApplySkinRelatedPopupMenuIcons;
+begin
+  if not Assigned(FMenuBitmapImages) or (FMenuBitmapImages.Count = 0) then Exit;
+  if Assigned(mnSelectSkin) then
+    mnSelectSkin.ImageIndex := MenuIconIndex('open.bmp', 3);
+  if Assigned(mnRandomSkin) then
+    mnRandomSkin.ImageIndex := MenuIconIndex('box closed.bmp', 32);
+  if Assigned(mnShowHints) then
+    mnShowHints.ImageIndex := MenuIconIndex('help.bmp', 20);
+  if Assigned(Exit2) then
+    Exit2.ImageIndex := MenuIconIndex('exit.bmp', 10);
+  if Assigned(miSelectSkindialog1) then
+    miSelectSkindialog1.ImageIndex := MenuIconIndex('open.bmp', 3);
+  if Assigned(R1) then
+    R1.ImageIndex := MenuIconIndex('box closed.bmp', 32);
+  if Assigned(M1) then
+    M1.ImageIndex := MenuIconIndex('search.bmp', 12);
+  if Assigned(C1) then
+    C1.ImageIndex := MenuIconIndex('tools.bmp', 6);
+end;
+
+procedure TfrmMain.EnsureToolsPopupFastFileExtras;
+begin
+  if not Assigned(PopupMenu1) or not Assigned(N6) then Exit;
+  if Assigned(FToolsExtrasSep) then Exit;
+
+  { Inserir sempre em N6.MenuIndex: cada insercao empurra N6 para baixo; ordem final
+    de cima para baixo = ultimo inserido primeiro. Queremos: sep, WW, RO, seg, tail, filtro, export, N6. }
+  FToolsExtrasExportFiltered := TMenuItem.Create(Self);
+  FToolsExtrasExportFiltered.Caption := TrText('E&xport filtered results');
+  FToolsExtrasExportFiltered.OnClick := miExportFilteredClick;
+  FToolsExtrasExportFiltered.ShortCut := ShortCut(Ord('L'), [ssCtrl, ssShift]);
+  FToolsExtrasExportFiltered.ImageIndex := MenuIconIndex('save as.bmp', 11);
+  PopupMenu1.Items.Insert(N6.MenuIndex, FToolsExtrasExportFiltered);
+
+  FToolsExtrasFilter := TMenuItem.Create(Self);
+  FToolsExtrasFilter.Caption := TrText('Fil&ter / Grep');
+  FToolsExtrasFilter.OnClick := miFilterClick;
+  FToolsExtrasFilter.ShortCut := ShortCut(Ord('L'), [ssCtrl]);
+  FToolsExtrasFilter.ImageIndex := MenuIconIndex('find.bmp', 4);
+  PopupMenu1.Items.Insert(N6.MenuIndex, FToolsExtrasFilter);
+
+  FToolsExtrasTail := TMenuItem.Create(Self);
+  FToolsExtrasTail.Caption := TrText('Tail / &Follow mode');
+  FToolsExtrasTail.OnClick := miToggleTailClick;
+  FToolsExtrasTail.ShortCut := ShortCut(Ord('T'), [ssCtrl]);
+  FToolsExtrasTail.ImageIndex := MenuIconIndex('forward.bmp', 2);
+  PopupMenu1.Items.Insert(N6.MenuIndex, FToolsExtrasTail);
+
+  FToolsExtrasSegmented := TMenuItem.Create(Self);
+  FToolsExtrasSegmented.Caption := TrText('Line-segmented &mode (heavy ops)');
+  FToolsExtrasSegmented.OnClick := miToggleSegmentedHeavyOpsClick;
+  FToolsExtrasSegmented.ImageIndex := MenuIconIndex('grid split cells.bmp', 19);
+  PopupMenu1.Items.Insert(N6.MenuIndex, FToolsExtrasSegmented);
+
+  FToolsExtrasReadOnly := TMenuItem.Create(Self);
+  FToolsExtrasReadOnly.Caption := TrText('Read-only &session');
+  FToolsExtrasReadOnly.OnClick := miToggleReadOnlyClick;
+  FToolsExtrasReadOnly.ShortCut := ShortCut(Ord('R'), [ssCtrl, ssAlt]);
+  FToolsExtrasReadOnly.ImageIndex := MenuIconIndex('box closed.bmp', 32);
+  PopupMenu1.Items.Insert(N6.MenuIndex, FToolsExtrasReadOnly);
+
+  FToolsExtrasWordWrap := TMenuItem.Create(Self);
+  FToolsExtrasWordWrap.Caption := TrText('&Word wrap');
+  FToolsExtrasWordWrap.OnClick := miToggleWordWrapClick;
+  FToolsExtrasWordWrap.ShortCut := ShortCut(Ord('W'), [ssCtrl]);
+  FToolsExtrasWordWrap.ImageIndex := MenuIconIndex('word wrap.bmp', 11);
+  PopupMenu1.Items.Insert(N6.MenuIndex, FToolsExtrasWordWrap);
+
+  FToolsExtrasSep := TMenuItem.Create(Self);
+  FToolsExtrasSep.Caption := '-';
+  PopupMenu1.Items.Insert(N6.MenuIndex, FToolsExtrasSep);
+end;
+
+procedure TfrmMain.EnsureToolsPopupBookmarkExtras;
+begin
+  if not Assigned(PopupMenu1) or not Assigned(FToolsExtrasReadOnly) or not Assigned(FToolsExtrasWordWrap) then Exit;
+  if Assigned(FToolsExtrasToggleBookmark) then Exit;
+
+  { Ordem visual do bloco: Sep, WW, Toggle, Next, Prev, Clear, RO, ... (inserir antes de RO). }
+  FToolsExtrasToggleBookmark := TMenuItem.Create(Self);
+  FToolsExtrasToggleBookmark.Caption := TrText('&Toggle bookmark');
+  FToolsExtrasToggleBookmark.OnClick := miToggleBookmarkClick;
+  FToolsExtrasToggleBookmark.ShortCut := ShortCut(Ord('B'), [ssCtrl]);
+  FToolsExtrasToggleBookmark.ImageIndex := MenuIconIndex('pushpin.bmp', 31);
+  PopupMenu1.Items.Insert(FToolsExtrasReadOnly.MenuIndex, FToolsExtrasToggleBookmark);
+
+  FToolsExtrasNextBookmark := TMenuItem.Create(Self);
+  FToolsExtrasNextBookmark.Caption := TrText('&Next bookmark');
+  FToolsExtrasNextBookmark.OnClick := miNextBookmarkClick;
+  FToolsExtrasNextBookmark.ShortCut := ShortCut(VK_F2, []);
+  FToolsExtrasNextBookmark.ImageIndex := MenuIconIndex('pushpin.bmp', 31);
+  PopupMenu1.Items.Insert(FToolsExtrasReadOnly.MenuIndex, FToolsExtrasNextBookmark);
+
+  FToolsExtrasPrevBookmark := TMenuItem.Create(Self);
+  FToolsExtrasPrevBookmark.Caption := TrText('Pr&evious bookmark');
+  FToolsExtrasPrevBookmark.OnClick := miPrevBookmarkClick;
+  FToolsExtrasPrevBookmark.ShortCut := ShortCut(VK_F2, [ssShift]);
+  FToolsExtrasPrevBookmark.ImageIndex := MenuIconIndex('pushpin.bmp', 31);
+  PopupMenu1.Items.Insert(FToolsExtrasReadOnly.MenuIndex, FToolsExtrasPrevBookmark);
+
+  FToolsExtrasClearBookmarks := TMenuItem.Create(Self);
+  FToolsExtrasClearBookmarks.Caption := TrText('Clear a&ll bookmarks');
+  FToolsExtrasClearBookmarks.OnClick := miClearBookmarksClick;
+  FToolsExtrasClearBookmarks.ShortCut := ShortCut(Ord('B'), [ssCtrl, ssShift]);
+  FToolsExtrasClearBookmarks.ImageIndex := MenuIconIndex('pushpin.bmp', 31);
+  PopupMenu1.Items.Insert(FToolsExtrasReadOnly.MenuIndex, FToolsExtrasClearBookmarks);
+end;
+
+procedure TfrmMain.UpdateToolsPopupFastFileExtrasCaptions;
+begin
+  if Assigned(FToolsExtrasSep) then
+    FToolsExtrasSep.Caption := '-';
+  if Assigned(FToolsExtrasWordWrap) then
+    FToolsExtrasWordWrap.Caption := TrText('&Word wrap');
+  if Assigned(FToolsExtrasReadOnly) then
+    FToolsExtrasReadOnly.Caption := TrText('Read-only &session');
+  if Assigned(FToolsExtrasSegmented) then
+    FToolsExtrasSegmented.Caption := TrText('Line-segmented &mode (heavy ops)');
+  if Assigned(FToolsExtrasTail) then
+    FToolsExtrasTail.Caption := TrText('Tail / &Follow mode');
+  if Assigned(FToolsExtrasFilter) then
+    FToolsExtrasFilter.Caption := TrText('Fil&ter / Grep');
+  if Assigned(FToolsExtrasExportFiltered) then
+    FToolsExtrasExportFiltered.Caption := TrText('E&xport filtered results');
+  if Assigned(FToolsExtrasToggleBookmark) then
+    FToolsExtrasToggleBookmark.Caption := TrText('&Toggle bookmark');
+  if Assigned(FToolsExtrasNextBookmark) then
+    FToolsExtrasNextBookmark.Caption := TrText('&Next bookmark');
+  if Assigned(FToolsExtrasPrevBookmark) then
+    FToolsExtrasPrevBookmark.Caption := TrText('Pr&evious bookmark');
+  if Assigned(FToolsExtrasClearBookmarks) then
+    FToolsExtrasClearBookmarks.Caption := TrText('Clear a&ll bookmarks');
 end;
 
 function TfrmMain.MenuIconIndex(const AFileName: string; const AFallbackIndex: Integer = -1): Integer;
@@ -1894,153 +2174,153 @@ begin
 
   TargetParent.DisableAlign;
   try
-  FConsumerAIPanel := TsPanel.Create(Self);
-  FConsumerAIPanel.Parent := TargetParent;
-  FConsumerAIPanel.Align := alRight;
-  FConsumerAIPanel.Width := 360;
-  FConsumerAIPanel.BevelOuter := bvNone;
-  FConsumerAIPanel.Caption := '';
-  FConsumerAIPanel.Visible := False;
-  FConsumerAIPanel.DoubleBuffered := True;
+    FConsumerAIPanel := TsPanel.Create(Self);
+    FConsumerAIPanel.Parent := TargetParent;
+    FConsumerAIPanel.Align := alRight;
+    FConsumerAIPanel.Width := 360;
+    FConsumerAIPanel.BevelOuter := bvNone;
+    FConsumerAIPanel.Caption := '';
+    FConsumerAIPanel.Visible := False;
+    FConsumerAIPanel.DoubleBuffered := True;
 
-  FConsumerAIHeaderPanel := TsPanel.Create(Self);
-  FConsumerAIHeaderPanel.Parent := FConsumerAIPanel;
-  FConsumerAIHeaderPanel.Align := alTop;
-  FConsumerAIHeaderPanel.Height := 34;
-  FConsumerAIHeaderPanel.Caption := '';
-  FConsumerAIHeaderPanel.Alignment := taLeftJustify;
-  FConsumerAIHeaderPanel.BevelOuter := bvNone;
+    FConsumerAIHeaderPanel := TsPanel.Create(Self);
+    FConsumerAIHeaderPanel.Parent := FConsumerAIPanel;
+    FConsumerAIHeaderPanel.Align := alTop;
+    FConsumerAIHeaderPanel.Height := 34;
+    FConsumerAIHeaderPanel.Caption := '';
+    FConsumerAIHeaderPanel.Alignment := taLeftJustify;
+    FConsumerAIHeaderPanel.BevelOuter := bvNone;
 
-  { Close first occupies far-right position with alRight; fixes overflow bug }
-  FConsumerAICloseButton := TsSpeedButton.Create(Self);
-  FConsumerAICloseButton.Parent := FConsumerAIHeaderPanel;
-  FConsumerAICloseButton.Align := alRight;
-  FConsumerAICloseButton.Width := 60;
-  FConsumerAICloseButton.Caption := TrText('Close');
-  FConsumerAICloseButton.OnClick := ConsumerAICloseClick;
+    { Close first occupies far-right position with alRight; fixes overflow bug }
+    FConsumerAICloseButton := TsSpeedButton.Create(Self);
+    FConsumerAICloseButton.Parent := FConsumerAIHeaderPanel;
+    FConsumerAICloseButton.Align := alRight;
+    FConsumerAICloseButton.Width := 60;
+    FConsumerAICloseButton.Caption := TrText('Close');
+    FConsumerAICloseButton.OnClick := ConsumerAICloseClick;
 
-  FConsumerAIExportButton := TsSpeedButton.Create(Self);
-  FConsumerAIExportButton.Parent := FConsumerAIHeaderPanel;
-  FConsumerAIExportButton.Align := alRight;
-  FConsumerAIExportButton.Width := 96;
-  FConsumerAIExportButton.Caption := TrText('Export transcript');
-  FConsumerAIExportButton.OnClick := ConsumerAIExportClick;
+    FConsumerAIExportButton := TsSpeedButton.Create(Self);
+    FConsumerAIExportButton.Parent := FConsumerAIHeaderPanel;
+    FConsumerAIExportButton.Align := alRight;
+    FConsumerAIExportButton.Width := 96;
+    FConsumerAIExportButton.Caption := TrText('Export transcript');
+    FConsumerAIExportButton.OnClick := ConsumerAIExportClick;
 
-  FConsumerAIClearButton := TsSpeedButton.Create(Self);
-  FConsumerAIClearButton.Parent := FConsumerAIHeaderPanel;
-  FConsumerAIClearButton.Align := alRight;
-  FConsumerAIClearButton.Width := 86;
-  FConsumerAIClearButton.Caption := TrText('Clear transcript');
-  FConsumerAIClearButton.OnClick := ConsumerAIClearClick;
+    FConsumerAIClearButton := TsSpeedButton.Create(Self);
+    FConsumerAIClearButton.Parent := FConsumerAIHeaderPanel;
+    FConsumerAIClearButton.Align := alRight;
+    FConsumerAIClearButton.Width := 86;
+    FConsumerAIClearButton.Caption := TrText('Clear transcript');
+    FConsumerAIClearButton.OnClick := ConsumerAIClearClick;
 
-  FConsumerAIRestartButton := TsSpeedButton.Create(Self);
-  FConsumerAIRestartButton.Parent := FConsumerAIHeaderPanel;
-  FConsumerAIRestartButton.Align := alRight;
-  FConsumerAIRestartButton.Width := 88;
-  FConsumerAIRestartButton.Caption := TrText('Restart session');
-  FConsumerAIRestartButton.OnClick := ConsumerAIRestartClick;
+    FConsumerAIRestartButton := TsSpeedButton.Create(Self);
+    FConsumerAIRestartButton.Parent := FConsumerAIHeaderPanel;
+    FConsumerAIRestartButton.Align := alRight;
+    FConsumerAIRestartButton.Width := 88;
+    FConsumerAIRestartButton.Caption := TrText('Restart session');
+    FConsumerAIRestartButton.OnClick := ConsumerAIRestartClick;
 
-  { Left area intentionally kept without title text }
-  FConsumerAITitleLabel := TsLabel.Create(Self);
-  FConsumerAITitleLabel.Parent := FConsumerAIHeaderPanel;
-  FConsumerAITitleLabel.Align := alClient;
-  FConsumerAITitleLabel.Caption := '';
-  FConsumerAITitleLabel.Layout := tlCenter;
-  FConsumerAITitleLabel.Transparent := True;
+    { Left area intentionally kept without title text }
+    FConsumerAITitleLabel := TsLabel.Create(Self);
+    FConsumerAITitleLabel.Parent := FConsumerAIHeaderPanel;
+    FConsumerAITitleLabel.Align := alClient;
+    FConsumerAITitleLabel.Caption := '';
+    FConsumerAITitleLabel.Layout := tlCenter;
+    FConsumerAITitleLabel.Transparent := True;
 
-  FConsumerAIMemo := TRichEdit.Create(Self);
-  FConsumerAIMemo.Parent := FConsumerAIPanel;
-  FConsumerAIMemo.Align := alClient;
-  FConsumerAIMemo.ReadOnly := True;
-  FConsumerAIMemo.ScrollBars := ssVertical;
-  FConsumerAIMemo.WordWrap := True;
-  FConsumerAIMemo.HideScrollBars := False;
-  FConsumerAIMemo.WantReturns := False;
-  FConsumerAIMemo.WantTabs := False;
-  FConsumerAIMemo.Font.Name := 'Consolas';
-  FConsumerAIMemo.Font.Size := 9;
-  FConsumerAIMemo.HideSelection := False;
-  FConsumerAIMemo.Lines.Text :=
-    TrText('AI workspace panel.') + sLineBreak + sLineBreak +
-    TrText('Click the Consumer AI button to start an inter-application session.');
+    FConsumerAIMemo := TRichEdit.Create(Self);
+    FConsumerAIMemo.Parent := FConsumerAIPanel;
+    FConsumerAIMemo.Align := alClient;
+    FConsumerAIMemo.ReadOnly := True;
+    FConsumerAIMemo.ScrollBars := ssVertical;
+    FConsumerAIMemo.WordWrap := True;
+    FConsumerAIMemo.HideScrollBars := False;
+    FConsumerAIMemo.WantReturns := False;
+    FConsumerAIMemo.WantTabs := False;
+    FConsumerAIMemo.Font.Name := 'Consolas';
+    FConsumerAIMemo.Font.Size := 9;
+    FConsumerAIMemo.HideSelection := False;
+    FConsumerAIMemo.Lines.Text :=
+      TrText('AI workspace panel.') + sLineBreak + sLineBreak +
+      TrText('Click the Consumer AI button to start an inter-application session.');
 
-  FConsumerAIPopupMenu := TPopupMenu.Create(Self);
-  FConsumerAIPopupMenu.OnPopup := ConsumerAIPopupPopup;
+    FConsumerAIPopupMenu := TPopupMenu.Create(Self);
+    FConsumerAIPopupMenu.OnPopup := ConsumerAIPopupPopup;
 
-  FConsumerAIPopupSelectAllItem := TMenuItem.Create(FConsumerAIPopupMenu);
-  FConsumerAIPopupSelectAllItem.Caption := TrText('Select all');
-  FConsumerAIPopupSelectAllItem.OnClick := ConsumerAIPopupSelectAllClick;
-  FConsumerAIPopupMenu.Items.Add(FConsumerAIPopupSelectAllItem);
+    FConsumerAIPopupSelectAllItem := TMenuItem.Create(FConsumerAIPopupMenu);
+    FConsumerAIPopupSelectAllItem.Caption := TrText('Select all');
+    FConsumerAIPopupSelectAllItem.OnClick := ConsumerAIPopupSelectAllClick;
+    FConsumerAIPopupMenu.Items.Add(FConsumerAIPopupSelectAllItem);
 
-  FConsumerAIPopupCopyItem := TMenuItem.Create(FConsumerAIPopupMenu);
-  FConsumerAIPopupCopyItem.Caption := TrText('Copy');
-  FConsumerAIPopupCopyItem.OnClick := ConsumerAIPopupCopyClick;
-  FConsumerAIPopupMenu.Items.Add(FConsumerAIPopupCopyItem);
+    FConsumerAIPopupCopyItem := TMenuItem.Create(FConsumerAIPopupMenu);
+    FConsumerAIPopupCopyItem.Caption := TrText('Copy');
+    FConsumerAIPopupCopyItem.OnClick := ConsumerAIPopupCopyClick;
+    FConsumerAIPopupMenu.Items.Add(FConsumerAIPopupCopyItem);
 
-  FConsumerAIPopupMenu.Items.Add(TMenuItem.Create(FConsumerAIPopupMenu));
-  FConsumerAIPopupMenu.Items[FConsumerAIPopupMenu.Items.Count - 1].Caption := '-';
+    FConsumerAIPopupMenu.Items.Add(TMenuItem.Create(FConsumerAIPopupMenu));
+    FConsumerAIPopupMenu.Items[FConsumerAIPopupMenu.Items.Count - 1].Caption := '-';
 
-  FConsumerAIPopupExportItem := TMenuItem.Create(FConsumerAIPopupMenu);
-  FConsumerAIPopupExportItem.Caption := TrText('Export transcript');
-  FConsumerAIPopupExportItem.OnClick := ConsumerAIPopupExportClick;
-  FConsumerAIPopupMenu.Items.Add(FConsumerAIPopupExportItem);
+    FConsumerAIPopupExportItem := TMenuItem.Create(FConsumerAIPopupMenu);
+    FConsumerAIPopupExportItem.Caption := TrText('Export transcript');
+    FConsumerAIPopupExportItem.OnClick := ConsumerAIPopupExportClick;
+    FConsumerAIPopupMenu.Items.Add(FConsumerAIPopupExportItem);
 
-  FConsumerAIMemo.PopupMenu := FConsumerAIPopupMenu;
+    FConsumerAIMemo.PopupMenu := FConsumerAIPopupMenu;
 
-  FConsumerAIInputPanel := TsPanel.Create(Self);
-  FConsumerAIInputPanel.Parent := FConsumerAIPanel;
-  FConsumerAIInputPanel.Align := alBottom;
-  FConsumerAIInputPanel.Height := 64;
-  FConsumerAIInputPanel.BevelOuter := bvNone;
-  FConsumerAIInputPanel.Caption := '';
+    FConsumerAIInputPanel := TsPanel.Create(Self);
+    FConsumerAIInputPanel.Parent := FConsumerAIPanel;
+    FConsumerAIInputPanel.Align := alBottom;
+    FConsumerAIInputPanel.Height := 64;
+    FConsumerAIInputPanel.BevelOuter := bvNone;
+    FConsumerAIInputPanel.Caption := '';
 
-  FConsumerAIStatusLabel := TsLabel.Create(Self);
-  FConsumerAIStatusLabel.Parent := FConsumerAIInputPanel;
-  FConsumerAIStatusLabel.Align := alTop;
-  FConsumerAIStatusLabel.Height := 18;
-  FConsumerAIStatusLabel.Caption := TrText('Disconnected');
+    FConsumerAIStatusLabel := TsLabel.Create(Self);
+    FConsumerAIStatusLabel.Parent := FConsumerAIInputPanel;
+    FConsumerAIStatusLabel.Align := alTop;
+    FConsumerAIStatusLabel.Height := 18;
+    FConsumerAIStatusLabel.Caption := TrText('Disconnected');
 
-  FConsumerAIOptionsPanel := TsPanel.Create(Self);
-  FConsumerAIOptionsPanel.Parent := FConsumerAIInputPanel;
-  FConsumerAIOptionsPanel.Align := alTop;
-  FConsumerAIOptionsPanel.Height := 0;
-  FConsumerAIOptionsPanel.BevelOuter := bvNone;
-  FConsumerAIOptionsPanel.Caption := '';
-  FConsumerAIOptionsPanel.Visible := False;
+    FConsumerAIOptionsPanel := TsPanel.Create(Self);
+    FConsumerAIOptionsPanel.Parent := FConsumerAIInputPanel;
+    FConsumerAIOptionsPanel.Align := alTop;
+    FConsumerAIOptionsPanel.Height := 0;
+    FConsumerAIOptionsPanel.BevelOuter := bvNone;
+    FConsumerAIOptionsPanel.Caption := '';
+    FConsumerAIOptionsPanel.Visible := False;
 
-  InputHost := TsPanel.Create(Self);
-  InputHost.Parent := FConsumerAIInputPanel;
-  InputHost.Align := alBottom;
-  InputHost.Height := 36;
-  InputHost.BevelOuter := bvNone;
-  InputHost.Caption := '';
+    InputHost := TsPanel.Create(Self);
+    InputHost.Parent := FConsumerAIInputPanel;
+    InputHost.Align := alBottom;
+    InputHost.Height := 36;
+    InputHost.BevelOuter := bvNone;
+    InputHost.Caption := '';
 
-  FConsumerAISendButton := TsSpeedButton.Create(Self);
-  FConsumerAISendButton.Parent := InputHost;
-  FConsumerAISendButton.Align := alRight;
-  FConsumerAISendButton.Width := 70;
-  FConsumerAISendButton.Caption := TrText('Send');
-  FConsumerAISendButton.Enabled := False;
-  FConsumerAISendButton.OnClick := ConsumerAISendClick;
+    FConsumerAISendButton := TsSpeedButton.Create(Self);
+    FConsumerAISendButton.Parent := InputHost;
+    FConsumerAISendButton.Align := alRight;
+    FConsumerAISendButton.Width := 70;
+    FConsumerAISendButton.Caption := TrText('Send');
+    FConsumerAISendButton.Enabled := False;
+    FConsumerAISendButton.OnClick := ConsumerAISendClick;
 
-  FConsumerAIInputEdit := TEdit.Create(Self);
-  FConsumerAIInputEdit.Parent := InputHost;
-  FConsumerAIInputEdit.Align := alClient;
-  FConsumerAIInputEdit.Text := '';
-  FConsumerAIInputEdit.Enabled := False;
-  FConsumerAIInputEdit.OnKeyDown := ConsumerAIInputKeyDown;
-  FConsumerAIInputEdit.OnChange := ConsumerAIInputChange;
+    FConsumerAIInputEdit := TEdit.Create(Self);
+    FConsumerAIInputEdit.Parent := InputHost;
+    FConsumerAIInputEdit.Align := alClient;
+    FConsumerAIInputEdit.Text := '';
+    FConsumerAIInputEdit.Enabled := False;
+    FConsumerAIInputEdit.OnKeyDown := ConsumerAIInputKeyDown;
+    FConsumerAIInputEdit.OnChange := ConsumerAIInputChange;
 
-  if Assigned(splListview) then
-  begin
-    if splListview.Parent <> TargetParent then
-      splListview.Parent := TargetParent;
-    splListview.Align := alRight;
-    splListview.Width := 4;
-    splListview.MinSize := 220;
-    splListview.Visible := False;
-    splListview.AutoSnap := False;
-  end;
+    if Assigned(splListview) then
+    begin
+      if splListview.Parent <> TargetParent then
+        splListview.Parent := TargetParent;
+      splListview.Align := alRight;
+      splListview.Width := 4;
+      splListview.MinSize := 220;
+      splListview.Visible := False;
+      splListview.AutoSnap := False;
+    end;
   finally
     TargetParent.EnableAlign;
   end;
@@ -3144,28 +3424,52 @@ begin
   popupmenuListView.Items.Clear;
   FPopupLVSelectItem   := nil;
   FPopupLVWordWrapItem := nil;
+  FPopupLVReadOnlyItem := nil;
+  FPopupLVSegmentedHeavyOpsItem := nil;
   popupmenuListView.OnPopup := popupmenuListViewPopup;
 
   { --- Edit group --- }
   AddItem(TrText('&Find...'),            miFindClick,        ShortCut(Ord('F'), [ssCtrl]), MenuIconIndex('search.bmp', 12));
   AddItem(TrText('Find and &Replace...'),miFindReplaceClick, ShortCut(Ord('H'), [ssCtrl]), MenuIconIndex('search and replace.bmp', 12));
   AddItem(TrText('&Go to line...'),      miGotoLineClick,    ShortCut(Ord('G'), [ssCtrl]),  MenuIconIndex('goto line.bmp', 7));
+  AddItem(TrText('&Go to byte offset...'), miGotoByteOffsetClick, ShortCut(Ord('G'), [ssCtrl, ssShift]), MenuIconIndex('goto line.bmp', 7));
   AddSep;
   AddItem(TrText('Copy selection'),      miCopyClick,        ShortCut(Ord('C'), [ssCtrl]),  MenuIconIndex('copy.bmp', 9));
   AddSep;
   AddItem(TrText('Undo'),                miUndoClick,        ShortCut(Ord('Z'), [ssCtrl]), MenuIconIndex('undo.bmp', 24));
   AddItem(TrText('Redo'),                miRedoClick,        ShortCut(Ord('Y'), [ssCtrl]), MenuIconIndex('redo.bmp', 24));
 
-  { --- Options group --- }
+  { --- View (word wrap + select + zoom + bookmarks) --- }
   AddSep;
   FPopupLVWordWrapItem :=
     AddItem(TrText('&Word wrap'),         miToggleWordWrapClick, ShortCut(Ord('W'), [ssCtrl]), MenuIconIndex('word wrap.bmp', 11));
-  AddItem(TrText('Fil&ter / Grep'),       miFilterClick,         ShortCut(Ord('L'), [ssCtrl]),  MenuIconIndex('find.bmp', 4));
-  AddSep;
   FPopupLVSelectItem :=
     AddItem(TrText('S&elect (checkbox list)'), miSelectClick,
       ShortCut(Ord('S'), [ssCtrl, ssShift]), MenuIconIndex('select all.bmp', 10));
+  AddItem(TrText('Zoom &in (list)'), miZoomListViewInClick, ShortCut(VK_ADD, [ssCtrl]),
+    MenuIconIndex(FF_MENU_BMP_ZOOM_LIST, MenuIconIndex('forward.bmp', 2)));
+  AddItem(TrText('Zoom o&ut (list)'), miZoomListViewOutClick, ShortCut(VK_SUBTRACT, [ssCtrl]),
+    MenuIconIndex(FF_MENU_BMP_ZOOM_LIST, MenuIconIndex('forward.bmp', 2)));
+  AddSep;
+  AddItem(TrText('&Toggle bookmark'), miToggleBookmarkClick, ShortCut(Ord('B'), [ssCtrl]), MenuIconIndex('pushpin.bmp', 31));
+  AddItem(TrText('&Next bookmark'), miNextBookmarkClick, ShortCut(VK_F2, []), MenuIconIndex('pushpin.bmp', 31));
+  AddItem(TrText('Pr&evious bookmark'), miPrevBookmarkClick, ShortCut(VK_F2, [ssShift]), MenuIconIndex('pushpin.bmp', 31));
+  AddItem(TrText('Clear a&ll bookmarks'), miClearBookmarksClick, ShortCut(Ord('B'), [ssCtrl, ssShift]), MenuIconIndex('pushpin.bmp', 31));
+
+  { --- Options / session --- }
+  AddSep;
+  FPopupLVReadOnlyItem :=
+    AddItem(TrText('Read-only &session'), miToggleReadOnlyClick, ShortCut(Ord('R'), [ssCtrl, ssAlt]), MenuIconIndex('box closed.bmp', 32));
+  FPopupLVSegmentedHeavyOpsItem :=
+    AddItem(TrText('Line-segmented &mode (heavy ops)'), miToggleSegmentedHeavyOpsClick, 0, MenuIconIndex('grid split cells.bmp', 19));
+  AddItem(TrText('Tail / &Follow mode'),   miToggleTailClick,   ShortCut(Ord('T'), [ssCtrl]),   MenuIconIndex('forward.bmp', 2));
+  AddItem(TrText('Fil&ter / Grep'),       miFilterClick,         ShortCut(Ord('L'), [ssCtrl]),  MenuIconIndex('find.bmp', 4));
+  AddItem(TrText('E&xport filtered results'), miExportFilteredClick, ShortCut(Ord('L'), [ssCtrl, ssShift]), MenuIconIndex('save as.bmp', 11));
+  AddSep;
+  AddItem(TrText('Compare / merge + &history...'), miCompareMergeHistoryClick,
+    ShortCut(Ord('H'), [ssCtrl, ssShift]), MenuIconIndex('grid merge cells.bmp', 22));
   AddItem(TrText('&Insert line'),   miInsertLineClick,  ShortCut(Ord('I'), [ssCtrl, ssShift]), MenuIconIndex('plus.bmp', 17));
+  AddItem(TrText('D&uplicate line'), miDuplicateLineClick, ShortCut(Ord('U'), [ssCtrl, ssShift]), MenuIconIndex('plus.bmp', 17));
   AddItem(TrText('&Edit line'),     miEditLineClick,    ShortCut(Ord('E'), [ssCtrl, ssShift]), MenuIconIndex('edit.bmp', 17));
   AddItem(TrText('&Delete line'),   miDeleteLinesClick, ShortCut(Ord('D'), [ssCtrl, ssShift]), MenuIconIndex('delete.bmp', 16));
   AddSep;
@@ -3181,6 +3485,10 @@ begin
   { Sync "Word wrap" checked state. }
   if Assigned(FPopupLVWordWrapItem) then
     FPopupLVWordWrapItem.Checked := Assigned(chkWordWrap) and chkWordWrap.Checked;
+  if Assigned(FPopupLVReadOnlyItem) then
+    FPopupLVReadOnlyItem.Checked := FFileSessionReadOnly;
+  if Assigned(FPopupLVSegmentedHeavyOpsItem) then
+    FPopupLVSegmentedHeavyOpsItem.Checked := Assigned(chkSegmentedHeavyOps) and chkSegmentedHeavyOps.Checked;
 end;
 
 procedure TfrmMain.RefreshLanguageRuntimeCache;
@@ -3213,6 +3521,9 @@ begin
     SendMessage(Handle, WM_SETREDRAW, 0, 0);
   try
     BuildMenuBitmapImageList;
+    EnsureToolsPopupFastFileExtras;
+    EnsureToolsPopupBookmarkExtras;
+    UpdateToolsPopupFastFileExtrasCaptions;
     RefreshLanguageRuntimeCache;
     FLastStatusLine := -1;
     FLastStatusCount := -1;
@@ -3431,6 +3742,13 @@ begin
     FastWordWrapAtivo := False;
     UpdateListViewWordWrapUi;
   end;
+  if Assigned(chkSegmentedHeavyOps) then
+  begin
+    chkSegmentedHeavyOps.Checked :=
+      sStoreUtils.ReadIniInteger(APPLICATION_NAME, 'SegmentHeavyOps', 0, IniName) = 1;
+    { FormCreate ja chamou ApplyCurrentLanguage antes do INI aplicar ao checkbox; re-sincroniza menus. }
+    chkSegmentedHeavyOpsClick(chkSegmentedHeavyOps);
+  end;
   UpdateListViewZoomStatusPanel;
 end;
 
@@ -3626,6 +3944,9 @@ begin
   FZoomWheelHistory := TStringList.Create;
   FLastZoomComboUpdateTick := 0;
   FTailActive := False;
+  FFileSessionReadOnly := False;
+  FMenuReadOnlyItem := nil;
+  FPopupLVReadOnlyItem := nil;
   FFilterActive := False;
   FFilterBits := nil;
   FFilterBitsSize := 0;
@@ -3738,6 +4059,12 @@ procedure TfrmMain.miGotoLineClick(Sender: TObject);
 begin
   EnsureReadTabVisible;
   DoGotoLine;
+end;
+
+procedure TfrmMain.miGotoByteOffsetClick(Sender: TObject);
+begin
+  EnsureReadTabVisible;
+  DoGotoByteOffset;
 end;
 
 procedure TfrmMain.miUndoClick(Sender: TObject);
@@ -3877,6 +4204,18 @@ begin
   EnsureReadTabVisible;
   if Assigned(btnCheckBoxes) and btnCheckBoxes.Enabled then
     btnCheckBoxesClick(btnCheckBoxes);
+end;
+
+procedure TfrmMain.miZoomListViewInClick(Sender: TObject);
+begin
+  EnsureReadTabVisible;
+  ApplyListViewWheelZoom(-120);
+end;
+
+procedure TfrmMain.miZoomListViewOutClick(Sender: TObject);
+begin
+  EnsureReadTabVisible;
+  ApplyListViewWheelZoom(120);
 end;
 
 procedure TfrmMain.miSplitFilesClick(Sender: TObject);
@@ -4245,6 +4584,185 @@ begin
   end;
 end;
 
+function TfrmMain.ShowSplitEqualPartsDialog(out ASourceFile: String;
+  out APartCount: Integer): Boolean;
+const
+  SPLIT_PARTS_MIN = 2;
+  SPLIT_PARTS_MAX = 1000;
+var
+  Frm: TMergeFilesDialogForm;
+  LblSource, LblParts, LblHint: TLabel;
+  EdtSource: TsFilenameEdit;
+  SpnParts: TsSpinEdit;
+  BtnOk, BtnCancel: TButton;
+  CurFile: String;
+begin
+  Result := False;
+  ASourceFile := '';
+  APartCount := SPLIT_PARTS_MIN;
+  EdtSource := nil;
+
+  Frm := TMergeFilesDialogForm.CreateNew(Self);
+  try
+    Frm.Caption := TrText('Split file into equal parts');
+    Frm.Position := poScreenCenter;
+    Frm.BorderStyle := bsDialog;
+    Frm.ClientWidth := 620;
+    Frm.ClientHeight := 440;
+
+    LblSource := TLabel.Create(Frm);
+    LblSource.Parent := Frm;
+    LblSource.Left := 16;
+    LblSource.Top := 16;
+    LblSource.Caption := TrText('Source file to split (path or picker):');
+
+    EdtSource := TsFilenameEdit.Create(Frm);
+    EdtSource.Parent := Frm;
+    EdtSource.Left := 16;
+    EdtSource.Top := 36;
+    EdtSource.Width := Frm.ClientWidth - 32;
+    EdtSource.DialogKind := dkOpen;
+    EdtSource.Filter := TrText('All files (*.*)|*.*');
+    CurFile := Trim(edtFileName.Text);
+    if (CurFile <> '') and (CurFile <> SELECTTEXT) then
+      EdtSource.Text := CurFile;
+    Frm.SetSourceEdit(EdtSource);
+    Frm.EnableFileDrop(True);
+
+    LblParts := TLabel.Create(Frm);
+    LblParts.Parent := Frm;
+    LblParts.Left := 16;
+    LblParts.Top := 80;
+    LblParts.Caption := TrText('Number of parts (2..1000):');
+
+    SpnParts := TsSpinEdit.Create(Frm);
+    SpnParts.Parent := Frm;
+    SpnParts.Left := 16;
+    SpnParts.Top := 100;
+    SpnParts.Width := 120;
+    SpnParts.MinValue := SPLIT_PARTS_MIN;
+    SpnParts.MaxValue := SPLIT_PARTS_MAX;
+    SpnParts.Value := SPLIT_PARTS_MIN;
+
+    LblHint := TLabel.Create(Frm);
+    LblHint.Parent := Frm;
+    LblHint.Left := 16;
+    LblHint.Top := 132;
+    LblHint.Width := Frm.ClientWidth - 32;
+    LblHint.Height := 168;
+    LblHint.AutoSize := False;
+    LblHint.WordWrap := True;
+    LblHint.Alignment := taLeftJustify;
+    LblHint.Caption := TrText('Parts are sized evenly by bytes; each part ends only after a complete line (LF). Part sizes may differ slightly.');
+
+    BtnOk := TButton.Create(Frm);
+    BtnOk.Parent := Frm;
+    BtnOk.Left := Frm.ClientWidth - 190;
+    BtnOk.Top := Frm.ClientHeight - 48;
+    BtnOk.Width := 80;
+    BtnOk.Caption := TrText('Confirm');
+    BtnOk.ModalResult := mrOk;
+    BtnOk.Default := True;
+
+    BtnCancel := TButton.Create(Frm);
+    BtnCancel.Parent := Frm;
+    BtnCancel.Left := Frm.ClientWidth - 100;
+    BtnCancel.Top := Frm.ClientHeight - 48;
+    BtnCancel.Width := 80;
+    BtnCancel.Caption := TrText('Cancel');
+    BtnCancel.ModalResult := mrCancel;
+    BtnCancel.Cancel := True;
+
+    if Frm.ShowModal <> mrOk then
+      Exit;
+
+    ASourceFile := Trim(EdtSource.Text);
+    APartCount := Integer(SpnParts.Value);
+    if (APartCount < SPLIT_PARTS_MIN) or (APartCount > SPLIT_PARTS_MAX) then
+    begin
+      ShowMessage(Format(TrText('Number of parts must be between %d and %d.'),
+        [SPLIT_PARTS_MIN, SPLIT_PARTS_MAX]));
+      Exit;
+    end;
+
+    Result := True;
+  finally
+    if Assigned(EdtSource) then
+      EdtSource.Color := Frm.FSourceEditDefaultColor;
+    Frm.EnableFileDrop(False);
+    Frm.Free;
+  end;
+end;
+
+procedure TfrmMain.miSplitEqualPartsClick(Sender: TObject);
+var
+  SourceFile: String;
+  PartCount: Integer;
+  LineCount: Int64;
+  Fs: TFileStream;
+  CurOpen: String;
+begin
+  EnsureReadTabVisible;
+
+  if not ShowSplitEqualPartsDialog(SourceFile, PartCount) then
+    Exit;
+
+  if SourceFile = '' then
+  begin
+    ShowMessage(TrText('Source file is required.'));
+    Exit;
+  end;
+
+  if not FileExists(SourceFile) then
+  begin
+    ShowMessage(TrText('Source file not found.'));
+    Exit;
+  end;
+
+  try
+    Fs := TFileStream.Create(SourceFile, fmOpenRead or fmShareDenyNone);
+    try
+      if Fs.Size <= 0 then
+      begin
+        ShowMessage(TrText('Source file is empty.'));
+        Exit;
+      end;
+    finally
+      Fs.Free;
+    end;
+  except
+    on E: Exception do
+    begin
+      ShowMessage(TrText('Could not open source file: ') + E.Message);
+      Exit;
+    end;
+  end;
+
+  LineCount := CountLinesInFile(SourceFile);
+  if LineCount < 0 then
+  begin
+    ShowMessage(TrText('Could not count lines in the source file.'));
+    Exit;
+  end;
+
+  if LineCount < PartCount then
+  begin
+    ShowMessage(Format(TrText('Not enough lines in the file for this many parts (lines: %d, parts: %d).'),
+      [LineCount, PartCount]));
+    Exit;
+  end;
+
+  CurOpen := Trim(edtFileName.Text);
+  if (CurOpen <> '') and (CurOpen <> SELECTTEXT) and
+     SameText(ExpandFileName(SourceFile), ExpandFileName(CurOpen)) then
+  begin
+    if not EnsureWritableSession then Exit;
+    CloseFileStreams;
+  end;
+
+  TSplitEqualPartsThread.Create(SourceFile, PartCount);
+end;
+
 function TfrmMain.TryGetLineStartOffset(const ALine1Based: Int64;
   out AOffset0Based: Int64): Boolean;
 const
@@ -4282,6 +4800,12 @@ begin
   end;
 end;
 
+procedure TfrmMain.miCompareMergeHistoryClick(Sender: TObject);
+begin
+  if TfrmCompareMerge.ExecuteModal(Self, Trim(edtFileName.Text), Trim(edtFileName.Text)) then
+    RefreshFile;
+end;
+
 procedure TfrmMain.miMergeFilesClick(Sender: TObject);
 var
   DestFileName, SourceFileName: String;
@@ -4305,6 +4829,8 @@ begin
     ShowMessage(TrText('Destination file not found.'));
     Exit;
   end;
+
+  if not EnsureWritableSession then Exit;
 
   if not ShowMergeFilesDialog(SourceFileName, MergeMode, InsertAfterLine, FromLine, ToLine) then
     Exit;
@@ -4412,6 +4938,13 @@ begin
     editFile(otInsert);
 end;
 
+procedure TfrmMain.miDuplicateLineClick(Sender: TObject);
+begin
+  EnsureReadTabVisible;
+  if Assigned(btnEditFile) and btnEditFile.Enabled then
+    editFile(otDuplicate);
+end;
+
 procedure TfrmMain.miEditLineClick(Sender: TObject);
 begin
   EnsureReadTabVisible;
@@ -4467,7 +5000,7 @@ procedure TfrmMain.BuildClassicMainMenu;
     AddItem(AParent, '-', nil);
   end;
 var
-  MFile, MEdit, MOptions, MHelp: TMenuItem;
+  MFile, MEdit, MView, MOptions, MHelp: TMenuItem;
 begin
   if not Assigned(MainMenu1) then Exit;
   { D7: TMenuItem nao tem BeginUpdate/EndUpdate nesta hierarquia. }
@@ -4491,28 +5024,51 @@ begin
     AddItem(MEdit, TrText('Find in &Files...'), miFindInFilesClick, ShortCut(Ord('F'), [ssCtrl, ssShift]), MenuIconIndex('search.bmp', 12));
     AddItem(MEdit, TrText('Find and &Replace...'), miFindReplaceClick, ShortCut(Ord('H'), [ssCtrl]), MenuIconIndex('search and replace.bmp', 12));
     AddItem(MEdit, TrText('&Go to line...'), miGotoLineClick, ShortCut(Ord('G'), [ssCtrl]), MenuIconIndex('goto line.bmp', 7));
+    AddItem(MEdit, TrText('&Go to byte offset...'), miGotoByteOffsetClick, ShortCut(Ord('G'), [ssCtrl, ssShift]), MenuIconIndex('goto line.bmp', 7));
     AddSeparator(MEdit);
     AddItem(MEdit, TrText('Undo'), miUndoClick, ShortCut(Ord('Z'), [ssCtrl]), MenuIconIndex('undo.bmp', 24));
     AddItem(MEdit, TrText('Redo'), miRedoClick, ShortCut(Ord('Y'), [ssCtrl]), MenuIconIndex('redo.bmp', 24));
     AddSeparator(MEdit);
     AddItem(MEdit, TrText('Copy selection'), miCopyClick, ShortCut(Ord('C'), [ssCtrl]), MenuIconIndex('copy.bmp', 9));
 
+    MView := AddItem(MainMenu1.Items, TrText('&View'), nil, 0, MenuIconIndex('normal view.bmp', 1));
+    AddItem(MView, TrText('&Word wrap'), miToggleWordWrapClick, ShortCut(Ord('W'), [ssCtrl]), MenuIconIndex('word wrap.bmp', 11));
+    AddItem(MView, TrText('S&elect (checkbox list)'), miSelectClick, ShortCut(Ord('S'), [ssCtrl, ssShift]), MenuIconIndex('select all.bmp', 10));
+    AddSeparator(MView);
+    AddItem(MView, TrText('Zoom &in (list)'), miZoomListViewInClick, ShortCut(VK_ADD, [ssCtrl]),
+      MenuIconIndex(FF_MENU_BMP_ZOOM_LIST, MenuIconIndex('forward.bmp', 2)));
+    AddItem(MView, TrText('Zoom o&ut (list)'), miZoomListViewOutClick, ShortCut(VK_SUBTRACT, [ssCtrl]),
+      MenuIconIndex(FF_MENU_BMP_ZOOM_LIST, MenuIconIndex('forward.bmp', 2)));
+    AddSeparator(MView);
+    AddItem(MView, TrText('&Toggle bookmark'), miToggleBookmarkClick, ShortCut(Ord('B'), [ssCtrl]), MenuIconIndex('pushpin.bmp', 31));
+    AddItem(MView, TrText('&Next bookmark'), miNextBookmarkClick, ShortCut(VK_F2, []), MenuIconIndex('pushpin.bmp', 31));
+    AddItem(MView, TrText('Pr&evious bookmark'), miPrevBookmarkClick, ShortCut(VK_F2, [ssShift]), MenuIconIndex('pushpin.bmp', 31));
+    AddItem(MView, TrText('Clear a&ll bookmarks'), miClearBookmarksClick, ShortCut(Ord('B'), [ssCtrl, ssShift]), MenuIconIndex('pushpin.bmp', 31));
+
     MOptions := AddItem(MainMenu1.Items, TrText('&Options'), nil, 0, MenuIconIndex('tools.bmp', 6));
-    AddItem(MOptions, TrText('&Word wrap'), miToggleWordWrapClick, ShortCut(Ord('W'), [ssCtrl]), MenuIconIndex('word wrap.bmp', 11));
+    FMenuReadOnlyItem :=
+      AddItem(MOptions, TrText('Read-only &session'), miToggleReadOnlyClick,
+        ShortCut(Ord('R'), [ssCtrl, ssAlt]), MenuIconIndex('box closed.bmp', 32));
+    FMenuReadOnlyItem.Checked := FFileSessionReadOnly;
+    FMenuSegmentedHeavyOpsItem :=
+      AddItem(MOptions, TrText('Line-segmented &mode (heavy ops)'), miToggleSegmentedHeavyOpsClick, 0,
+        MenuIconIndex('grid split cells.bmp', 19));
+    if Assigned(FMenuSegmentedHeavyOpsItem) then
+      FMenuSegmentedHeavyOpsItem.Checked := Assigned(chkSegmentedHeavyOps) and chkSegmentedHeavyOps.Checked;
     AddItem(MOptions, TrText('Tail / &Follow mode'), miToggleTailClick, ShortCut(Ord('T'), [ssCtrl]), MenuIconIndex('forward.bmp', 2));
     AddItem(MOptions, TrText('Fil&ter / Grep'), miFilterClick, ShortCut(Ord('L'), [ssCtrl]), MenuIconIndex('find.bmp', 4));
     AddItem(MOptions, TrText('E&xport filtered results'), miExportFilteredClick, ShortCut(Ord('L'), [ssCtrl, ssShift]), MenuIconIndex('save as.bmp', 11));
     AddSeparator(MOptions);
-    AddItem(MOptions, TrText('&Toggle bookmark'), miToggleBookmarkClick, ShortCut(Ord('B'), [ssCtrl]), MenuIconIndex('pushpin.bmp', 31));
-    AddItem(MOptions, TrText('&Next bookmark'), miNextBookmarkClick, ShortCut(VK_F2, []), MenuIconIndex('pushpin.bmp', 31));
-    AddItem(MOptions, TrText('Pr&evious bookmark'), miPrevBookmarkClick, ShortCut(VK_F2, [ssShift]), MenuIconIndex('pushpin.bmp', 31));
-    AddItem(MOptions, TrText('Clear a&ll bookmarks'), miClearBookmarksClick, ShortCut(Ord('B'), [ssCtrl, ssShift]), MenuIconIndex('pushpin.bmp', 31));
-    AddSeparator(MOptions);
-    AddItem(MOptions, TrText('S&elect (checkbox list)'), miSelectClick, ShortCut(Ord('S'), [ssCtrl, ssShift]), MenuIconIndex('select all.bmp', 10));
     AddItem(MOptions, TrText('Spl&it Files'), miSplitFilesClick, ShortCut(Ord('K'), [ssCtrl, ssShift]), MenuIconIndex('grid split cells.bmp', 19));
     AddItem(MOptions, TrText('&Merge lines'), miMergeLinesClick, ShortCut(Ord('M'), [ssCtrl, ssShift]), MenuIconIndex('grid merge cells.bmp', 22));
-    AddItem(MOptions, TrText('Merge &files...'), miMergeFilesClick, 0, MenuIconIndex('grid.bmp', 22));
+    AddItem(MOptions, TrText('Merge &files...'), miMergeFilesClick,
+      ShortCut(Ord('J'), [ssCtrl, ssShift]), MenuIconIndex('grid.bmp', 22));
+    AddItem(MOptions, TrText('Compare / merge + &history...'), miCompareMergeHistoryClick,
+      ShortCut(Ord('H'), [ssCtrl, ssShift]), MenuIconIndex('grid merge cells.bmp', 22));
+    AddItem(MOptions, TrText('Split file into e&qual parts...'), miSplitEqualPartsClick,
+      ShortCut(Ord('P'), [ssCtrl, ssShift]), MenuIconIndex('grid split cells.bmp', 19));
     AddItem(MOptions, TrText('&Insert line'), miInsertLineClick, ShortCut(Ord('I'), [ssCtrl, ssShift]), MenuIconIndex('plus.bmp', 17));
+    AddItem(MOptions, TrText('D&uplicate line'), miDuplicateLineClick, ShortCut(Ord('U'), [ssCtrl, ssShift]), MenuIconIndex('plus.bmp', 17));
     AddItem(MOptions, TrText('&Edit line'), miEditLineClick, ShortCut(Ord('E'), [ssCtrl, ssShift]), MenuIconIndex('edit.bmp', 17));
     AddItem(MOptions, TrText('&Delete line'), miDeleteLinesClick, ShortCut(Ord('D'), [ssCtrl, ssShift]), MenuIconIndex('delete.bmp', 16));
     AddItem(MOptions, TrText('Exp&ort'), miExportClick, ShortCut(Ord('O'), [ssCtrl, ssShift]), MenuIconIndex('save as.bmp', 11));
@@ -4541,6 +5097,9 @@ begin
     sStoreUtils.WriteIniStr(APPLICATION_NAME, 'SkinDirectory', DataModule1.sSkinManager1.SkinDirectory, IniName);      // Skin directory
     sStoreUtils.WriteIniStr(APPLICATION_NAME, 'SkinName',      DataModule1.sSkinManager1.SkinName, IniName);           // Skin name
     sStoreUtils.WriteIniStr(APPLICATION_NAME, 'SkinActive', iff(DataModule1.sSkinManager1.Active, '1', '0'), IniName); // Skin activity
+    if Assigned(chkSegmentedHeavyOps) then
+      sStoreUtils.WriteIniStr(APPLICATION_NAME, 'SegmentHeavyOps',
+        iff(chkSegmentedHeavyOps.Checked, '1', '0'), IniName);
     ResetLastError;
     // Check if custom skin has been defined in the "Menus" frame
     if sSkinMenus.CustomMenuFont <> nil then
@@ -4685,7 +5244,7 @@ begin
     end
     else
       if (FirstItem = PopupMenu1.Items[0]) then begin
-        Caption := 'Tools';
+        Caption := Tr('titlebar.tools', 'Tools');
         Glyph := CharImageList16.CreateBitmap32Color(33, iGlyphSize, iGlyphSize, GetSectionTextColor, iGlyphSize);
       end
       else
@@ -4695,7 +5254,7 @@ begin
         end
         else
           LineVisible := False;   *)
-        Caption := 'Tools';
+        Caption := Tr('titlebar.tools', 'Tools');
           Glyph := CharImageList16.CreateBitmap32Color(34, iGlyphSize, iGlyphSize, GetSectionTextColor, iGlyphSize);
 end;
 
@@ -5059,6 +5618,16 @@ begin
     GenerateSkinsList; // Generate a list of available skins form menu
     DataModule1.sSkinManager1.SkinableMenus.HookPopupMenu(PopupMenu1, DataModule1.sSkinManager1.Active);
   end;
+  if Assigned(FToolsExtrasWordWrap) then
+    FToolsExtrasWordWrap.Checked := Assigned(chkWordWrap) and chkWordWrap.Checked;
+  if Assigned(FToolsExtrasReadOnly) then
+    FToolsExtrasReadOnly.Checked := FFileSessionReadOnly;
+  if Assigned(FToolsExtrasSegmented) then
+    FToolsExtrasSegmented.Checked := Assigned(chkSegmentedHeavyOps) and chkSegmentedHeavyOps.Checked;
+  if Assigned(FToolsExtrasTail) then
+    FToolsExtrasTail.Checked := FTailActive;
+  if Assigned(FToolsExtrasFilter) then
+    FToolsExtrasFilter.Checked := FFilterActive;
 end;
 
 procedure ChangeHUE(sm: TsSkinManager; Value: integer; DoRepaint: boolean);
@@ -5269,7 +5838,283 @@ const
     '======================================================='#13#10 +
     ''#13#10 +
     '-------------------------------------------------------'#13#10 +
-    '  v2.1.6.36  (2026-04-06)  (current)'#13#10 +
+    '  v2.1.6.68  (2026-04-24)  (current)'#13#10 +
+      '-------------------------------------------------------'#13#10 +
+      '  Compare/Merge UI: Right-click popup rules refined:'#13#10 +
+      '    equal (green) rows show Copy selection + Go to line only;'#13#10 +
+      '    differing rows show only the appropriate Apply direction;'#13#10 +
+      '  Compare/Merge UI: OwnerData fix - popup + custom draw now use'#13#10 +
+      '    diff row source (no false-green rows / wrong menu on full-file diff);'#13#10 +
+      '  i18n: "There is no difference between the files." accented'#13#10 +
+      '    translations restored (11 languages);'#13#10 +
+      '  UX: Esc closes the app when pgMain is hidden.'#13#10 +
+      ''#13#10 +
+      '-------------------------------------------------------'#13#10 +
+      '  v2.1.6.67  (2026-04-22)'#13#10 +
+      '-------------------------------------------------------'#13#10 +
+      '  Apply Merge UI: Context menus with smart row selection;'#13#10 +
+      '  Apply Merge UI: Fixed missing/truncated EOF lines bug;'#13#10 +
+      '  Apply Merge UI: Fixed double-encoding charset issues;'#13#10 +
+      '  Apply Merge UI: Suppressed listview flickering completely;'#13#10 +
+      ''#13#10 +
+      '-------------------------------------------------------'#13#10 +
+      '  v2.1.6.66  (2026-04-20)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  Apply Merge UI: Re-engineered O(N) backward flow'#13#10 +
+    '    to avoid recursive padding loops & UI freezes;'#13#10 +
+    '  Progress UI: Render throttle stops AlphaControls GDI'#13#10 +
+    '    exhaustion (MemDC) on transparent overlay;'#13#10 +
+    '  Overlay: Alpha-bitmap fix for SmoothLoading logo;'#13#10 +
+    '  Safety: File streams release to avoid Sharing Violations.'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.65  (2026-04-18)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  APPLICATION_VERSION + CHANGELOG + HISTORY + F1 help:'#13#10 +
+    '    two new TrText help lines (11 langs) for session'#13#10 +
+    '    history reload (progress phases + multitasking).'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.64  (2026-04-18)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  uSmoothLoading: ShowLoading(msg, AStayOnTop); history'#13#10 +
+    '    reload uses ShowLoading(..., False) + BringToFront;'#13#10 +
+    '  uCompareMergeUI: HistPumpUIMessagesAndYield (PM + MsgWait),'#13#10 +
+    '    SyncApply chunks 12/12, worker Sleep in char loops,'#13#10 +
+    '    SetSmoothProgress Sleep(2); D7 MsgWait THandle var fix.'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.63  (2026-04-18)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  Session history reload: progress 0..54% worker (tail,'#13#10 +
+    '    filter, preview, color scan) then 55..99% UI apply;'#13#10 +
+    '    PostMessage flush throttle; tail progress every 256KB.'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.62  (2026-04-16)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  uI18n AddCommonTranslationsCompareMerge: Set11 assigns'#13#10 +
+    '    every Compare/Merge dialog TrText key in all 11 langs'#13#10 +
+    '    (no English fallback for ES/FR/DE/IT/PL/RO/HU/CZ);'#13#10 +
+    '    PT-BR mesclar wording; extras block unchanged; guide'#13#10 +
+    '    DOC_COMPARAR_MESCLAR_HISTORICO_PASSO_A_PASSO.md;'#13#10 +
+    '  CHANGELOG_IMPLEMENTACOES.md + UnConsts.APPLICATION_VERSION.'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.61  (2026-04-15)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  Compare/Merge + session history modal (uCompareMergeUI):'#13#10 +
+    '    diff + history tabs, lvHistFile journal colors, ctx menus,'#13#10 +
+    '    ExecuteModal->RefreshFile, TabSheetDiff/ui fixes; first'#13#10 +
+    '    wave of 11-lang strings for preview/context (see .62).'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.60  (2026-04-14)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  Host bump: CHANGELOG + UnConsts + HISTORY sync (.58-.59'#13#10 +
+    '    deliverables unchanged in entries below).'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.59  (2026-04-14)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  Status-bar file details: BuildLoadedFileDetailsText'#13#10 +
+    '    (path, disk size, file times, lines/chars/max offset,'#13#10 +
+    '    detected + list-view encoding, RO/WW/tail/segmented/'#13#10 +
+    '    filter flags, list mode, status read summary);'#13#10 +
+    '    ShowDetailsPopup 560x440, Tr(File details), ESC'#13#10 +
+    '    (KeyPreview+DetailsPopupKeyDown), OK Default; i18n'#13#10 +
+    '    for detail labels + Text copied to clipboard! (11 langs)'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.58  (2026-04-14)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  View menu &View (Alt+V): Word wrap, Select, Zoom in/out'#13#10 +
+    '    (Ctrl+Num+/-), bookmarks (from Options); Select removed'#13#10 +
+    '    from Options; ListView popup View mirrors menu order;'#13#10 +
+    '    Tools: EnsureToolsPopupBookmarkExtras between WW and RO;'#13#10 +
+    '    i18n &View + zoom menu/help (11 langs); F1 Alt+V'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.57  (2026-04-14)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  i18n (11 langs): Line-segmented &mode (heavy ops) menu'#13#10 +
+    '    caption; F1 help line Ctrl+Alt+R (read-only);'#13#10 +
+    '    FastFile - Version History memo title; Dialogs submenu;'#13#10 +
+    '    pt-PT Version History keys; title-bar Tools extra-line'#13#10 +
+    '    uses Tr(titlebar.tools)'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.56  (2026-04-14)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  Shortcuts: Ctrl+Alt+R = read-only session; Ctrl+R ='#13#10 +
+    '    recent files only; Ctrl+W = word wrap (Ctrl alone);'#13#10 +
+    '  ListView popup: Tail + Export filtered + read-only icon;'#13#10 +
+    '    Tools menu items carry same shortcuts as Options'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.55  (2026-04-14)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  Title-bar Tools (PopupMenu1): dynamic FastFile block'#13#10 +
+    '    (word wrap, read-only, segmented, tail, filter, export);'#13#10 +
+    '    FMenuBitmapImages on PopupMenu1 + PopupDialogs + icon map;'#13#10 +
+    '    segmented mode in Options + list popup + Tools; OnPopup sync'#13#10 +
+    '  Removed menu entries: Allow animation, Change BidiMode'#13#10 +
+    '    (demo + Tools; Bidi remains on toolbar); FormShow re-sync'#13#10 +
+    '    segmented checkbox -> menu checkmarks'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.54  (2026-04-13)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  Line-segmented batch delete (same checkbox as Replace All):'#13#10 +
+    '    merge temp + atomic rename; hint updated (i18n)'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.53  (2026-04-13)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  Optional line-segmented Replace All (toolbar checkbox,'#13#10 +
+    '    INI SegmentHeavyOps): temp parts by index, merge +'#13#10 +
+    '    atomic rename; boundary-match caveat in confirm + hint'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.52  (2026-04-13)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  Large-file safety: tail-append reads growth in 64MB'#13#10 +
+    '    chunks (GetMem/Read Integer limit); filter bitset'#13#10 +
+    '    refuses allocation > MaxInt lines; MMF PtrAt uses'#13#10 +
+    '    PAnsiChar pointer math'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.51  (2026-04-13)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  i18n: Polish/Czech Find–Replace + Duplicate line'#13#10 +
+    '    strings corrected (CP1250 letters)'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.50  (2026-04-13)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  Options + list popup: Duplicate line (after Insert) +'#13#10 +
+    '    Ctrl+Shift+U; i18n menu caption D&uplicate line'#13#10 +
+    '  Find & Replace dialog: button mnemonics (Alt+N/R/L/C)'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.48–49  (2026-04-13)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  Filter view: prefix / contains / VBScript regex + case Q;'#13#10 +
+    '    filter build progress (lines); regex COM CoInit/Uninit on worker'#13#10 +
+    '  Find: backward byte progress; Esc cancels in-flight search'#13#10 +
+    '  Replace-all: streaming overlay (bytes + replacements); confirm text'#13#10 +
+    '  Encoding combo [Save note]; line preview cap 256KB + dual-byte footer'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.47  (2026-04-12)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  • Session read-only toggle (Options + list popup):'#13#10 +
+    '    guards edit / delete / merge-delta / merge-files /'#13#10 +
+    '    split-by-files-lines + replace + undo-redo'#13#10 +
+    '  • View encoding combo hint: default vs forced decode note'#13#10 +
+    '  • Long line preview: truncation footer with total bytes'#13#10 +
+    '  • i18n (11 langs) for new strings'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.46  (2026-04-12)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  • CHANGELOG_IMPLEMENTACOES.md + APPLICATION_VERSION'#13#10 +
+    '    (UnConsts) aligned with this in-app Version History'#13#10 +
+    '  • i18n (11 langs): help memo rows (Ctrl+Shift+G /'#13#10 +
+    '    Filter Ctrl+L / FILTER section note), filter status'#13#10 +
+    '    (cleared / filtering / Filter n/N), Ready, line-not-'#13#10 +
+    '    in-filter message; PL accelerator on Go to byte offset'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.45  (2026-04-12)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  • Filter / Grep: after typing needle, MessageDlg picks'#13#10 +
+    '    line-prefix match vs contains-anywhere (view only)'#13#10 +
+    '  • TFilterThread: FMatchMode (fmmContains / fmmPrefix);'#13#10 +
+    '    StartFilter passes mode from DoFilterDialog'#13#10 +
+    '  • gotoLine: Application.MessageBox uses TrText when'#13#10 +
+    '    requested real line is absent from active filter'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.44  (2026-04-12)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  • Go to byte offset: 1-based file byte (+ $ hex);'#13#10 +
+    '    Line0BasedForFileByte1Based binary search on index'#13#10 +
+    '  • Edit menu + ListView popup item + Ctrl+Shift+G;'#13#10 +
+    '    GetLineStartOffset parameter widened to Int64'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.43  (2026-04-12)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  • About FastFile: Developed by + Hamden Vogel; Contact'#13#10 +
+    '    email label (i18n); Build time: TrText; lblDevelopedBy,'#13#10 +
+    '    taller pnlTop / pnlGNU layout (UnFormAboutFF)'#13#10 +
+    '  • Help (F1): removed trailing Delphi 7 tagline from'#13#10 +
+    '    HELP_TEXT; placeholders replaced with TrText rows'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.42  (2026-04-12)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  • i18n: stale-file prompt, find progress, disk/rename/'#13#10 +
+    '    replace-all safety messages and UnUtils atomic-save'#13#10 +
+    '    errors translated in all 11 application languages'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.41  (2026-04-11)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  • Read tab: snapshot size+mtime after load; invalidate'#13#10 +
+    '    on close streams so external edits are detectable'#13#10 +
+    '  • EnsureOpenFileNotStaleForMutate before edit / replace /'#13#10 +
+    '    replace-all / merge-delta / undo-redo mutating paths'#13#10 +
+    '  • Find in file: status bar shows byte progress'#13#10 +
+    '    (Searching ... / total) during TFindInFileThread'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.40  (2026-04-11)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  • UnUtils: GetFileSizeAndWriteTime, SameFileSizeAndWriteTime,'#13#10 +
+    '    TryRenameTempOverTarget (temp + retries + backup rename),'#13#10 +
+    '    VolumeHasMinFreeBytes via kernel32 GetDiskFreeSpaceExA'#13#10 +
+    '  • uSmoothLoading: disk free check before heavy writer'#13#10 +
+    '    threads; atomic finalize rename; REPLACE_ALL_MATCH_LIMIT'#13#10 +
+    '    (5M) with cancel / limit-hit paths; TMergeDeltaThread'#13#10 +
+    '    try/except/finally structure fix (D7 compile)'#13#10 +
+    '  • RegressionTests: test_snapshot_logic.py + README note'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.39  (2026-04-10)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  • Split into equal parts - finish UX + i18n:'#13#10 +
+    '    Dialogs.ShowMessage summaries (success / failure /'#13#10 +
+    '    interrupted) via SplitEqualParts.* Format strings,'#13#10 +
+    '    all 11 languages; mmTimer log line (parts + folder)'#13#10 +
+    '  • Split-equal modal: larger client height, hint label'#13#10 +
+    '    with WordWrap + fixed height + left alignment'#13#10 +
+    '  • Menu accelerators PT/ES/PT-PT/RO: &iguais / &iguales /'#13#10 +
+    '    &egale (fixes duplicate leading i in captions)'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.38  (2026-04-10)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  • Split-equal algorithm: approximate equal byte targets'#13#10 +
+    '    snapped to next LF (no trailing half-lines); outputs'#13#10 +
+    '    <name>.partNNN<ext> beside source; overwrite guard'#13#10 +
+    '  • Pre-checks: empty file, open/share test, CountLinesInFile'#13#10 +
+    '    >= part count, CloseFileStreams when splitting the'#13#10 +
+    '    file currently open in Read tab'#13#10 +
+    '  • SpinEdit value -> Integer(SpnParts.Value) (D7 type fix)'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.37  (2026-04-10)'#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  • New TSplitEqualPartsThread (`uSmoothLoading`):'#13#10 +
+    '    background split with TfrmSmoothLoading progress'#13#10 +
+    '  • Options menu + runtime modal (merge-style shell):'#13#10 +
+    '    source TsFilenameEdit + parts 2..1000 + i18n labels'#13#10 +
+    '  • Initial uI18n keys for dialog, loading text, errors'#13#10 +
+    ''#13#10 +
+    '-------------------------------------------------------'#13#10 +
+    '  v2.1.6.36  (2026-04-06)'#13#10 +
     '-------------------------------------------------------'#13#10 +
     '  • Merge-lines delta modal (`uDeltaEditor`): layout'#13#10 +
     '    uses real button widths so Content never overlaps'#13#10 +
@@ -5802,7 +6647,8 @@ begin
     Memo.WordWrap := False;
     Memo.Font.Name := 'Courier New';
     Memo.Font.Size := 9;
-    Memo.Lines.Text := HISTORY;
+    Memo.Lines.Text := StringReplace(HISTORY,
+      '  FastFile - Version History', '  FastFile - Version History', []);
 
     BtnW := 120;
     TotalW := BtnW * 3 + 16;
@@ -5810,7 +6656,7 @@ begin
 
     BtnCopy := TButton.Create(F);
     BtnCopy.Parent := F;
-    BtnCopy.Caption := TrText('&Copy');
+    BtnCopy.Caption := '&Copy';
     BtnCopy.Width := BtnW;
     BtnCopy.Height := 28;
     BtnCopy.Left := StartX;
@@ -5820,7 +6666,7 @@ begin
 
     BtnExport := TButton.Create(F);
     BtnExport.Parent := F;
-    BtnExport.Caption := TrText('&Export...');
+    BtnExport.Caption := '&Export...';
     BtnExport.Width := BtnW;
     BtnExport.Height := 28;
     BtnExport.Left := StartX + BtnW + 8;
@@ -6505,6 +7351,7 @@ begin
   fScrollPos := 0;
   ScrollBarVerticalScroll(self, scPosition, fScrollPos);
   ScrollBarHorizontal.Position := 0;
+  ApplySessionReadOnlyUi;
 end;
 
 (*procedure TMainForm.ListView1CustomDrawItem(Sender: TCustomListView;
@@ -6895,22 +7742,14 @@ begin
           pageNumber := FilteredIndexToReal(Offset + Int64(i));
           if pageNumber < 0 then Continue;
           DispIdx := pageNumber + 1;
-          if IsBookmarked(Integer(pageNumber)) then
-            str := '* Line: ' + FormatFloat('#,', DispIdx) + '  ' +
-              getLineContentsFromLineIndex(DispIdx - 1)
-          else
-            str := 'Line: ' + FormatFloat('#,', DispIdx) + '  ' +
-              getLineContentsFromLineIndex(DispIdx - 1);
+          str := 'Line: ' + FormatFloat('#,', DispIdx) + '  ' +
+            getLineContentsFromLineIndex(DispIdx - 1);
         end
         else
         begin
           DispIdx := Offset + (i + 1);
-          if IsBookmarked(Integer(Offset + i)) then
-            str := '* Line: ' + FormatFloat('#,', DispIdx) + '  ' +
-              getLineContentsFromLineIndex(DispIdx - 1)
-          else
-            str := 'Line: ' + FormatFloat('#,', DispIdx) + '  ' +
-              getLineContentsFromLineIndex(DispIdx - 1);
+          str := 'Line: ' + FormatFloat('#,', DispIdx) + '  ' +
+            getLineContentsFromLineIndex(DispIdx - 1);
         end;
         FCheckListBox.Items.AddObject(str, TObject(Integer(DispIdx)));
       end;
@@ -7255,8 +8094,8 @@ begin
     if FIdx < 0 then
     begin
       Application.MessageBox(
-        PChar('Essa linha nao esta entre os resultados do filtro atual.'),
-        'Ir para linha', MB_OK or MB_ICONINFORMATION);
+        PChar(TrText('This line is not in the current filter results.')),
+        PChar(TrText('Ir para linha')), MB_OK or MB_ICONINFORMATION);
       Exit;
     end;
     Offset := 0;
@@ -7388,7 +8227,7 @@ begin
   else
   begin
     if (RealLineIdx >= 0) and IsBookmarked(RealLineIdx) then
-      Bk := $00FFF0E0
+      Bk := FF_BOOKMARK_ROW_BG
     else
       Bk := clWindow;
     Fg := clWindowText;
@@ -7420,6 +8259,21 @@ begin
   if not CLB.Enabled then
     CheckFlags := CheckFlags or DFCS_INACTIVE;
   DrawFrameControl(CLB.Canvas.Handle, CheckRect, DFC_BUTTON, CheckFlags);
+
+  if (not (odSelected in DrawState)) and (RealLineIdx >= 0) and IsBookmarked(RealLineIdx) then
+  begin
+    SegLeft := CheckRect.Right + 2;
+    SegRight := SegLeft + 4;
+    if SegRight > CLB.ClientWidth - 1 then
+      SegRight := CLB.ClientWidth - 1;
+    if SegRight > SegLeft then
+    begin
+      CLB.Canvas.Brush.Color := FF_BOOKMARK_STRIPE;
+      CLB.Canvas.Pen.Style := psClear;
+      CLB.Canvas.Rectangle(SegLeft, Rect.Top, SegRight, Rect.Bottom);
+      CLB.Canvas.Pen.Style := psSolid;
+    end;
+  end;
 
   { Garante separacao visual entre checkbox e texto em todos os modos de desenho. }
   if Rect.Left < (CheckRect.Right + CHECKBOX_TEXT_GAP) then
@@ -7528,11 +8382,6 @@ end;
 procedure TfrmMain.M1Click(Sender: TObject);
 begin
   sMagnifier1.Execute;
-end;
-
-procedure TfrmMain.C2Click(Sender: TObject);
-begin
-  changeBidiMode;
 end;
 
 procedure TfrmMain.changeBidiMode;
@@ -7781,6 +8630,10 @@ var
   StartOff, EndOff, LenDel: Int64;
   SegStart, SegLen: TInt64DynArray;
   ts, tl: Int64;
+  DelArr: TInt64DynArray;
+  IdxPath: string;
+  SegOk: Boolean;
+  SegErr: string;
 
   procedure SortSegDesc(ACount: Integer);
   var
@@ -7831,6 +8684,8 @@ begin
       Exit;
     end;
 
+    if not EnsureWritableSession then Exit;
+
     ToDelete.SortUp;
     i := 0;
     while i < ToDelete.Count - 1 do
@@ -7847,6 +8702,25 @@ begin
 
     FileName := edtFileName.Text;
     if (FileName = '') or (not FileExists(FileName)) then Exit;
+
+    IdxPath := ExtractFilePath(ParamStr(0)) + 'temp.txt';
+    if Assigned(chkSegmentedHeavyOps) and chkSegmentedHeavyOps.Checked then
+    begin
+      SetLength(DelArr, ToDelete.Count);
+      for i := 0 to ToDelete.Count - 1 do
+        DelArr[i] := ToDelete.Items[i];
+      CloseFileStreams;
+      SegOk := TrySegmentedBatchDelete(FileName, IdxPath, DelArr, 250000, SegErr);
+      if SegOk then
+      begin
+        if SegErr <> '' then
+          MessageDlg(SegErr, mtError, [mbOK], 0)
+        else
+          BeginRead;
+        Exit;
+      end;
+      OpenFileStreams(FileName);
+    end;
 
     if not Assigned(FIndexFileStream) or not Assigned(FSourceFileStream) then
       OpenFileStreams(FileName);
@@ -9430,6 +10304,8 @@ begin
     Exit;
   end;
 
+  if not EnsureWritableSession then Exit;
+
   DeltaFile := ExtractFilePath(ParamStr(0)) + ChangeFileExt(ExtractFileName(edtFileName.Text), '.delta');
 
   AList := TStringList.Create;
@@ -9446,6 +10322,7 @@ begin
       end;
 
       AList.SaveToFile(DeltaFile);
+      if not EnsureOpenFileNotStaleForMutate then Exit;
       TMergeDeltaThread.Create(edtFileName.Text, DeltaFile);
     end;
   finally
@@ -9475,6 +10352,7 @@ var
 begin
   if Trim(edtFileName.Text) = '' then begin ShowMessage('Please select a file.'); Exit; end;
   if not FileExists(edtFileName.Text) then begin ShowMessage('File not found.'); Exit; end;
+  if not EnsureWritableSession then Exit;
 
   with clFiles do
   begin
@@ -9528,6 +10406,7 @@ var
 begin
   if Trim(edtFileName.Text) = '' then begin ShowMessage('Please select a file.'); Exit; end;
   if not FileExists(edtFileName.Text) then begin ShowMessage('File not found.'); Exit; end;
+  if not EnsureWritableSession then Exit;
 
   SourceLine := spnFromSplitByLine.Value;
   TargetLine := spnToSplitByLine.Value;
@@ -10222,11 +11101,15 @@ begin
         comboViewEncoding.Hint :=
           FTrDetectedOnFile + FDetectedEncoding + #13#10 +
           FTrListViewUses + EffectiveDisplayEncoding + #13#10 +
-          FTrNoRereadDefault
+          FTrNoRereadDefault + #13#10 +
+          TrText('View encoding: forced (list decode only; file on disk unchanged).')
       else
         comboViewEncoding.Hint :=
           FTrDetectedOnFile + FDetectedEncoding + FTrDefaultViewSuffix + #13#10 +
-          FTrNoRereadForced;
+          FTrNoRereadForced + #13#10 +
+          TrText('View encoding: default (list follows detected BOM/heuristics).');
+      comboViewEncoding.Hint := comboViewEncoding.Hint + #13#10 + TrText(
+        '[Save note] DEFAULT follows detection; a forced view only changes list decoding until an operation rewrites the file on disk.');
     end;
   end;
 end;
@@ -10530,18 +11413,78 @@ begin
     ExecutePanelIndexOne;
 end;
 
-procedure TfrmMain.ExecutePanelIndexOne;
+function TfrmMain.BuildLoadedFileDetailsText: string;
 var
-  lastAccessTime,
-  lastModificationTime: TDateTime;
-  textInformation: string;
+  lastAccessTime, lastModificationTime: TDateTime;
+  Sz: Int64;
+  EncDisp, listModeLine: string;
+
+  function Dt(const D: TDateTime): string;
+  begin
+    Result := FormatDateTime('yyyy-mm-dd hh:nn:ss', D);
+  end;
+
+  function YN(const B: Boolean): string;
+  begin
+    if B then
+      Result := TrText('Yes')
+    else
+      Result := TrText('No');
+  end;
+
+  procedure AddLine(const S: string);
+  begin
+    Result := Result + S + #13#10;
+  end;
+
+  procedure AddKV(const Name, Value: string);
+  begin
+    AddLine(Name + ' ' + Value);
+  end;
+begin
+  Result := '';
+  if fileIsEmpty then Exit;
+
+  if UnUtils.CheckFile(Trim(edtFileName.Text)) then
+  begin
+    DSiWin32.DSiGetFileTimes(Trim(edtFileName.Text), creationTime, lastAccessTime, lastModificationTime);
+    Sz := UnUtils.GetFileSize(Trim(edtFileName.Text));
+    AddKV(TrText('File name:'), Trim(edtFileName.Text));
+    AddKV(TrText('Size on disk:'), Format('%s %s', [UnUtils.FormatNumber(Sz), TrText('bytes')]));
+    AddKV(TrText('Creation Date:'), Dt(creationTime));
+    AddKV(TrText('Modified:'), Dt(lastModificationTime));
+    AddKV(TrText('Last accessed:'), Dt(lastAccessTime));
+    AddKV(TrText('Total lines:'), UnUtils.FormatNumber(totalLines));
+    AddKV(TrText('Total characters:'), UnUtils.FormatNumber(totalCharacters));
+    AddKV(TrText('Max indexed offset:'), UnUtils.FormatNumber(MaxOffset));
+    AddKV(TrText('Detected encoding (file):'), FDetectedEncoding);
+    EncDisp := '';
+    if Assigned(comboViewEncoding) and (comboViewEncoding.ItemIndex >= 0) and
+      (comboViewEncoding.ItemIndex < comboViewEncoding.Items.Count) then
+      EncDisp := comboViewEncoding.Items[comboViewEncoding.ItemIndex];
+    AddKV(TrText('View encoding (list):'), EncDisp);
+    AddKV(TrText('Read-only session:'), YN(FFileSessionReadOnly));
+    AddKV(TrText('Word wrap (visual):'), YN(Assigned(chkWordWrap) and chkWordWrap.Checked));
+    AddKV(TrText('Tail / follow mode:'), YN(FTailActive));
+    AddKV(TrText('Line-segmented mode:'), YN(Assigned(chkSegmentedHeavyOps) and chkSegmentedHeavyOps.Checked));
+    AddKV(TrText('Filter / Grep active:'), YN(FFilterActive));
+    if isChecked then
+      listModeLine := TrText('List mode: checkbox list')
+    else
+      listModeLine := TrText('List mode: list view');
+    AddLine(listModeLine);
+    AddLine('');
+    AddLine(TrText('Read summary (status):'));
+    AddLine(lblInfoFileTime.Caption);
+  end
+  else
+    AddKV(TrText('File name:'), Trim(edtFileName.Text));
+end;
+
+procedure TfrmMain.ExecutePanelIndexOne;
 begin
   if fileIsEmpty then Exit;
-  DSiWin32.DSiGetFileTimes(edtFileName.Text, creationTime, lastAccessTime, lastModificationTime);
-  textInformation := Format('FileName: %s'#13#10'%s'#13#10'Total Characters: %s'#13#10'Creation Date: %s',
-    [edtFileName.Text, frmMain.lblInfoFileTime.Caption,
-      UnUtils.FormatNumber(totalCharacters), FormatDateTime('dd/mm/yyyy', creationTime)]);
-  ShowDetailsPopup(textInformation);
+  ShowDetailsPopup(BuildLoadedFileDetailsText);
 end;
 
 // -----------------------------------------------------------------------------
@@ -10569,6 +11512,15 @@ end;
 // -----------------------------------------------------------------------------
 // LOGIC: Create and Show the Dynamic Modal Form
 // -----------------------------------------------------------------------------
+procedure TfrmMain.DetailsPopupKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
+begin
+  if Key = VK_ESCAPE then
+  begin
+    Key := 0;
+    (Sender as TForm).ModalResult := mrCancel;
+  end;
+end;
+
 procedure TfrmMain.ShowDetailsPopup(const TextContent: string);
 var
   PopupForm: TForm;
@@ -10578,11 +11530,13 @@ begin
   // 1. Create the Form
   PopupForm := TForm.Create(nil);
   try
-    PopupForm.Caption := TrText('Details');
+    PopupForm.Caption := TrText('File details');
     PopupForm.Position := poScreenCenter;
     PopupForm.BorderStyle := bsDialog;
-    PopupForm.Width := 400;
-    PopupForm.Height := 300;
+    PopupForm.KeyPreview := True;
+    PopupForm.OnKeyDown := DetailsPopupKeyDown;
+    PopupForm.Width := 560;
+    PopupForm.Height := 440;
 
     // 2. Create the Memo (Text Display)
     DetailMemo := TMemo.Create(PopupForm);
@@ -10613,6 +11567,7 @@ begin
     BtnOK.Parent := PopupForm;
     BtnOK.Caption := TrText('OK');
     BtnOK.ModalResult := mrOk; // This automatically closes the modal
+    BtnOK.Default := True;
     BtnOK.Left := PopupForm.ClientWidth - 85;
     BtnOK.Top := PopupForm.ClientHeight - 35;
     BtnOK.Anchors := [akRight, akBottom];
@@ -10704,20 +11659,24 @@ begin
   UnUtils.ActionComponent([btnClear, btnSplitFiles, btnMergeMultipleLines, btnCheckBoxes, btnExport, btnEditFile], acEnabled);
   //ListView1.Invalidate;
   UpdateInfoPanels;
+  CaptureOpenFileDiskSnapshot;
 end;
 
 procedure TfrmMain.CloseFileStreams;
 begin
   if Assigned(FSourceFileStream) then FreeAndNil(FSourceFileStream);
   if Assigned(FIndexFileStream) then FreeAndNil(FIndexFileStream);
+  InvalidateOpenFileDiskSnapshot;
   InvalidateLineCache;
   ListView1.Items.Count := 0;
   ListView1.Invalidate;
+  ApplySessionReadOnlyUi;
 end;
 
 function TfrmMain.GetLineContent(LineIndex: Integer): String;
 var
   StartOffset, EndOffset: Int64;
+  FullLineLen: Int64;
   LineLength: Integer;
   Buffer: AnsiString;
   OffsetBuf: array[0..39] of AnsiChar; // room for 2 index records (18+2 each)
@@ -10754,9 +11713,12 @@ begin
       
     EndOffset := Abs(EndOffset);
 
-    LineLength := EndOffset - StartOffset;
-    if LineLength <= 0 then Exit;
-    if LineLength > MAX_LINE_LEN_DISPLAY then LineLength := MAX_LINE_LEN_DISPLAY;
+    FullLineLen := EndOffset - StartOffset;
+    if FullLineLen <= 0 then Exit;
+    if FullLineLen > MAX_LINE_LEN_DISPLAY then
+      LineLength := MAX_LINE_LEN_DISPLAY
+    else
+      LineLength := FullLineLen;
 
     FSourceFileStream.Seek(StartOffset - 1, soFromBeginning);
     SetLength(Buffer, LineLength);
@@ -10767,6 +11729,9 @@ begin
 
     SetLength(Buffer, BytesRead2);
     Result := DisplayTextFromFileBytes(Buffer, EffectiveDisplayEncoding);
+    if FullLineLen > MAX_LINE_LEN_DISPLAY then
+      Result := Result + ' ' + Format(TrText('[Line preview limited to %s bytes for performance; file line total %s bytes.]'),
+        [UnUtils.FormatNumber(MAX_LINE_LEN_DISPLAY), UnUtils.FormatNumber(FullLineLen)]);
   except
     Result := '';
   end;
@@ -10819,7 +11784,6 @@ procedure TfrmMain.ListView1Data(Sender: TObject; Item: TListItem);
 var
   Index: Int64;
   RealLine: Int64;
-  BkMark: string;
   LineContent: string;
   S_WW: AnsiString;
 begin
@@ -10842,11 +11806,6 @@ begin
   end;
 
   // Pre-build line content and caption in one go
-  if FFilterActive then
-  begin
-    if IsBookmarked(Integer(RealLine)) then BkMark := '* ' else BkMark := '';
-  end
-  else if IsBookmarked(Integer(Offset + Item.Index)) then BkMark := '* ' else BkMark := '';
   LineContent := getLineContentsFromLineIndex(Index - 1);
 
   if (not FFastVisualWordWrap) and FastWordWrapAtivo and Assigned(FIndexFileStream) then
@@ -10857,7 +11816,7 @@ begin
     if StrToInt64Def(Trim(string(S_WW)), 0) < 0 then
       Item.Caption := ''
     else
-      Item.Caption := BkMark + 'Line: ' + FormatFloat('#,', Index);
+      Item.Caption := 'Line: ' + FormatFloat('#,', Index);
     if Item.SubItems.Count = 0 then
       Item.SubItems.Add(LineContent)
     else
@@ -10865,7 +11824,7 @@ begin
   end
   else
   begin
-    Item.Caption := BkMark + 'Line: ' + FormatFloat('#,', Index);
+    Item.Caption := 'Line: ' + FormatFloat('#,', Index);
     if Item.SubItems.Count = 0 then
       Item.SubItems.Add(LineContent)
     else
@@ -11561,6 +12520,7 @@ var
   CurrentContent, OriginalContent: String;
 begin
   if ListviewIsEmpty then Exit;
+  if not EnsureWritableSession then Exit;
   if isChecked and Assigned(FCheckListBox) then
   begin
     if FCheckListBox.ItemIndex < 0 then Exit;
@@ -11586,6 +12546,7 @@ begin
   // If user clicks OK, but nothing changed, Execute returns FALSE (Optimization)
   if TfrmLineEditor.Execute(Op, LineNum, CurrentContent) then
   begin
+    if not EnsureOpenFileNotStaleForMutate then Exit;
     CloseFileStreams;
     TEditFileThread.Create(edtFileName.Text, Op, LineNum, CurrentContent);
   end;
@@ -12095,6 +13056,117 @@ begin
   BeginRead;
 end;
 
+procedure TfrmMain.UpdateFindSearchProgress(const BytesDone, TotalBytes: Int64);
+begin
+  if TotalBytes <= 0 then Exit;
+  UpdateStatusBar(TrText('Searching') + ' ' + UnUtils.FormatNumber(BytesDone) + ' / ' +
+    UnUtils.FormatNumber(TotalBytes) + ' B', iaRight);
+end;
+
+procedure TfrmMain.CaptureOpenFileDiskSnapshot;
+var
+  P: string;
+begin
+  FOpenDiskSnapValid := False;
+  FOpenDiskSnapPath := '';
+  FOpenDiskSnapSize := 0;
+  FillChar(FOpenDiskSnapWrite, SizeOf(FOpenDiskSnapWrite), 0);
+  P := Trim(edtFileName.Text);
+  if (P = '') or SameText(P, SELECTTEXT) or (not FileExists(P)) then
+    Exit;
+  FOpenDiskSnapPath := ExpandFileName(P);
+  UnUtils.GetFileSizeAndWriteTime(FOpenDiskSnapPath, FOpenDiskSnapSize, FOpenDiskSnapWrite);
+  FOpenDiskSnapValid := True;
+end;
+
+procedure TfrmMain.InvalidateOpenFileDiskSnapshot;
+begin
+  FOpenDiskSnapValid := False;
+  FOpenDiskSnapPath := '';
+  FOpenDiskSnapSize := 0;
+  FillChar(FOpenDiskSnapWrite, SizeOf(FOpenDiskSnapWrite), 0);
+end;
+
+function TfrmMain.EnsureOpenFileNotStaleForMutate: Boolean;
+var
+  P: string;
+  R: Integer;
+begin
+  Result := True;
+  if not FOpenDiskSnapValid then Exit;
+  P := Trim(edtFileName.Text);
+  if (P = '') or SameText(P, SELECTTEXT) or (not FileExists(P)) then Exit;
+  if not SameText(ExpandFileName(P), FOpenDiskSnapPath) then Exit;
+  if UnUtils.SameFileSizeAndWriteTime(P, FOpenDiskSnapSize, FOpenDiskSnapWrite) then Exit;
+
+  R := Application.MessageBox(
+    PChar(TrText('File changed on disk since load')),
+    PChar(TrText('File changed on disk')),
+    MB_YESNOCANCEL or MB_ICONWARNING);
+  case R of
+    IDYES:
+      begin
+        BeginRead;
+        Result := False;
+      end;
+    IDNO:
+      begin
+        CaptureOpenFileDiskSnapshot;
+        Result := True;
+      end;
+  else
+    Result := False;
+  end;
+end;
+
+function TfrmMain.EnsureWritableSession: Boolean;
+begin
+  Result := True;
+  if not FFileSessionReadOnly then Exit;
+  Application.MessageBox(
+    PChar(TrText('Read-only session is enabled. Turn it off in Options to edit or save the file.')),
+    PChar(TrText('Read-only')),
+    MB_OK or MB_ICONINFORMATION);
+  Result := False;
+end;
+
+procedure TfrmMain.ApplySessionReadOnlyUi;
+begin
+  if FFileSessionReadOnly and Assigned(FSourceFileStream) then
+  begin
+    if Assigned(btnEditFile) then btnEditFile.Enabled := False;
+    if Assigned(btnDeleteLines) then btnDeleteLines.Enabled := False;
+    if Assigned(btnMergeMultipleLines) then btnMergeMultipleLines.Enabled := False;
+    if Assigned(btnSplitFiles) then btnSplitFiles.Enabled := False;
+    UpdateStatusBar(TrText('Read-only session'), iaRight);
+  end
+  else if Assigned(FSourceFileStream) then
+  begin
+    UnUtils.ActionComponent([btnRead, btnClear, btnDeleteLines, btnSplitFiles, btnMergeMultipleLines,
+      btnCheckBoxes, btnExport, btnEditFile], acEnabled);
+  end;
+end;
+
+procedure TfrmMain.miToggleReadOnlyClick(Sender: TObject);
+begin
+  FFileSessionReadOnly := not FFileSessionReadOnly;
+  if Assigned(FMenuReadOnlyItem) then
+    FMenuReadOnlyItem.Checked := FFileSessionReadOnly;
+  if Assigned(FPopupLVReadOnlyItem) then
+    FPopupLVReadOnlyItem.Checked := FFileSessionReadOnly;
+  if Assigned(FToolsExtrasReadOnly) then
+    FToolsExtrasReadOnly.Checked := FFileSessionReadOnly;
+  ApplySessionReadOnlyUi;
+end;
+
+procedure TfrmMain.miToggleSegmentedHeavyOpsClick(Sender: TObject);
+begin
+  EnsureReadTabVisible;
+  if not Assigned(chkSegmentedHeavyOps) then Exit;
+  chkSegmentedHeavyOps.Checked := not chkSegmentedHeavyOps.Checked;
+  chkSegmentedHeavyOpsClick(chkSegmentedHeavyOps);
+end;
+
 { ============================================================================ }
 { TFindInFileThread Implementation                                             }
 { ============================================================================ }
@@ -12122,12 +13194,19 @@ begin
   FFound := False;
   FFoundLine := -1;
   FFoundPos := -1;
+  FLastFindProgressPos := -1;
   Resume;
 end;
 
 procedure TFindInFileThread.NotifyOwner;
 begin
   FOwner.FindThreadDone(FFound, FFoundLine, FFoundPos, FSearchId, FErrorMsg);
+end;
+
+procedure TFindInFileThread.SyncFindBytesProgress;
+begin
+  if Assigned(FOwner) then
+    FOwner.UpdateFindSearchProgress(FProgBytes, FProgTotal);
 end;
 
 function TFindInFileThread.OffsetToLineIndex(AIndexStream: TFileStream; const APos1Based: Int64): Integer;
@@ -12309,13 +13388,22 @@ begin
           if TailLen > Length(WorkBuf) then TailLen := Length(WorkBuf);
           SetLength(Tail, TailLen);
           if TailLen > 0 then Move(WorkBuf[Length(WorkBuf) - TailLen], Tail[0], TailLen);
-        end else begin TailLen := 0; SetLength(Tail, 0); end;
+        end         else begin TailLen := 0; SetLength(Tail, 0); end;
         CurPos := CurPos + BytesRead;
+        if (FileSize > 0) and ((FLastFindProgressPos < 0) or (CurPos - FLastFindProgressPos >= 2 * 1024 * 1024) or (CurPos >= FileSize)) then
+        begin
+          FProgBytes := CurPos;
+          FProgTotal := FileSize;
+          FLastFindProgressPos := CurPos;
+          if not Terminated then
+            Synchronize(SyncFindBytesProgress);
+        end;
       end;
     end
     else
     begin
       // backward: scan blocks in reverse, find last match before FStartPos
+      FLastFindProgressPos := -1;
       CurPos := FStartPos;
       while (not Terminated) and (CurPos > 0) and (not FFound) do
       begin
@@ -12347,6 +13435,17 @@ begin
         // overlap
         if (NeedLen > 1) and (CurPos > 0) then
           CurPos := CurPos + NeedLen - 1;
+        if (FileSize > 0) and ((FLastFindProgressPos < 0) or
+          ((FileSize - CurPos) - FLastFindProgressPos >= 2 * 1024 * 1024) or (CurPos <= 0)) then
+        begin
+          FProgBytes := FileSize - CurPos;
+          if FProgBytes < 0 then FProgBytes := 0;
+          if FProgBytes > FileSize then FProgBytes := FileSize;
+          FProgTotal := FileSize;
+          FLastFindProgressPos := FileSize - CurPos;
+          if not Terminated then
+            Synchronize(SyncFindBytesProgress);
+        end;
       end;
     end;
     except
@@ -12367,26 +13466,42 @@ end;
 
 constructor TFilterThread.Create(AOwner: TfrmMain;
   const AFileName, AIndexFileName, ANeedle: string;
-  ACaseSensitive: Boolean; ATotalLines: Int64);
+  ACaseSensitive: Boolean; ATotalLines: Int64; AMatchMode: TFilterMatchMode);
+var
+  BitsNeeded: Int64;
 begin
   inherited Create(True);
   FreeOnTerminate := True;
   FOwner := AOwner;
   FFileName := AFileName;
   FIndexFileName := AIndexFileName;
-  if ACaseSensitive then
+  FMatchMode := AMatchMode;
+  if FMatchMode = fmmRegex then
+    FNeedle := AnsiString(ANeedle)
+  else if ACaseSensitive then
     FNeedle := AnsiString(ANeedle)
   else
     FNeedle := AnsiString(AnsiUpperCase(ANeedle));
   FCaseSensitive := ACaseSensitive;
   FTotalLines := ATotalLines;
   FFilteredCount := 0;
-  FBitsSize := (ATotalLines + 7) div 8;
-  if FBitsSize > 0 then begin
-    GetMem(FBits, FBitsSize);
-    FillChar(FBits^, FBitsSize, 0);
-  end else
+  FAbortMsg := '';
+  BitsNeeded := (ATotalLines + 7) div 8;
+  { GetMem size is Integer: avoid silent wrap on huge line counts. }
+  if (ATotalLines > 0) and (BitsNeeded > MaxInt) then
+  begin
+    FBitsSize := 0;
     FBits := nil;
+    FAbortMsg := TrText('Filter: line count too large for filter memory (32-bit limit).');
+  end
+  else begin
+    FBitsSize := Integer(BitsNeeded);
+    if FBitsSize > 0 then begin
+      GetMem(FBits, FBitsSize);
+      FillChar(FBits^, FBitsSize, 0);
+    end else
+      FBits := nil;
+  end;
   Resume;
 end;
 
@@ -12408,6 +13523,18 @@ begin
   FOwner.FilterThreadDone;
 end;
 
+procedure TFilterThread.SyncFilterProgress;
+begin
+  if Assigned(FOwner) then
+    FOwner.UpdateFilterBuildProgress(FProgLines, FProgTotalLines);
+end;
+
+procedure TFilterThread.SyncFilterFailed;
+begin
+  if Assigned(FOwner) then
+    FOwner.FinishFilterThreadFailed(FAbortMsg);
+end;
+
 procedure TFilterThread.Execute;
 var
   SourceStream: TFileStream;
@@ -12422,10 +13549,55 @@ var
   JumpIdx: Integer;
   ByteIdx, BitIdx: Integer;
   NeedleLen: Integer;
+  Matched: Boolean;
+  RegObj: OleVariant;
+  RegexReady: Boolean;
+  ComNeedUninit: Boolean;
+  ComHr: HRESULT;
 begin
   SourceStream := nil;
   IndexStream := nil;
+  RegexReady := False;
+  ComNeedUninit := False;
+
+  { VBScript.RegExp exige COM nesta thread (CreateOleObject falha com "CoInitialize not called"). }
+  if FMatchMode = fmmRegex then
+  begin
+    ComHr := CoInitialize(nil);
+    if (ComHr <> S_OK) and (ComHr <> S_FALSE) then
+    begin
+      FAbortMsg := TrText('Could not initialize COM for the regex filter.');
+      Synchronize(SyncFilterFailed);
+      Exit;
+    end;
+    ComNeedUninit := True;
+  end;
+
   try
+    if FMatchMode = fmmRegex then
+    begin
+      try
+        RegObj := CreateOleObject('VBScript.RegExp');
+        RegObj.Pattern := String(FNeedle);
+        RegObj.Global := False;
+        RegObj.IgnoreCase := not FCaseSensitive;
+        RegObj.Multiline := True;
+        RegexReady := True;
+      except
+        FAbortMsg := TrText('VBScript.RegExp is not available (invalid pattern or missing component).');
+        Synchronize(SyncFilterFailed);
+        Exit;
+      end;
+    end;
+
+    if (FTotalLines > 0) and not Assigned(FBits) then
+    begin
+      if Trim(FAbortMsg) = '' then
+        FAbortMsg := TrText('Filter: line count too large for filter memory (32-bit limit).');
+      Synchronize(SyncFilterFailed);
+      Exit;
+    end;
+
     SourceStream := TFileStream.Create(FFileName, fmOpenRead or fmShareDenyNone);
     IndexStream := TFileStream.Create(FIndexFileName, fmOpenRead or fmShareDenyNone);
     FSize := SourceStream.Size;
@@ -12434,10 +13606,18 @@ begin
     MatchCount := 0;
     JumpIdx := 0;
     SetLength(FJumpTable, (FTotalLines div 1024) + 2);
+    FProgTotalLines := FTotalLines;
 
     I := 0;
     while (I < FTotalLines) and (not Terminated) do
     begin
+      if (I and $1FFF) = 0 then
+      begin
+        FProgLines := I;
+        if not Terminated then
+          Synchronize(SyncFilterProgress);
+      end;
+
       IndexStream.Seek(I * INDEX_RECORD_SIZE, soFromBeginning);
       IndexStream.Read(Pointer(OffsetStr)^, 18);
       StartOffset := StrToInt64Def(Trim(String(OffsetStr)), -1);
@@ -12456,9 +13636,40 @@ begin
       SourceStream.Read(Pointer(Buffer)^, LineLength);
       while (Length(Buffer) > 0) and (Buffer[Length(Buffer)] in [#10, #13]) do
         SetLength(Buffer, Length(Buffer) - 1);
-      if FCaseSensitive then LineContent := Buffer
-      else LineContent := AnsiString(AnsiUpperCase(String(Buffer)));
-      if (NeedleLen > 0) and (Pos(FNeedle, LineContent) > 0) then begin
+      if FMatchMode = fmmRegex then
+        LineContent := Buffer
+      else if FCaseSensitive then
+        LineContent := Buffer
+      else
+        LineContent := AnsiString(AnsiUpperCase(String(Buffer)));
+      Matched := False;
+      if NeedleLen > 0 then
+      begin
+        if FMatchMode = fmmRegex then
+        begin
+          if RegexReady then
+          begin
+            try
+              Matched := RegObj.Test(WideString(String(Buffer)));
+            except
+              Matched := False;
+            end;
+          end;
+        end
+        else if FMatchMode = fmmPrefix then
+        begin
+          if Length(LineContent) >= NeedleLen then
+          begin
+            if FCaseSensitive then
+              Matched := Copy(LineContent, 1, NeedleLen) = FNeedle
+            else
+              Matched := AnsiString(AnsiUpperCase(Copy(String(LineContent), 1, NeedleLen))) = FNeedle;
+          end;
+        end
+        else
+          Matched := Pos(FNeedle, LineContent) > 0;
+      end;
+      if Matched then begin
         ByteIdx := I div 8;
         BitIdx := I mod 8;
         FBits^[ByteIdx] := FBits^[ByteIdx] or (1 shl BitIdx);
@@ -12477,6 +13688,11 @@ begin
   finally
     if Assigned(IndexStream) then FreeAndNil(IndexStream);
     if Assigned(SourceStream) then FreeAndNil(SourceStream);
+    if ComNeedUninit then
+    begin
+      CoUninitialize;
+      ComNeedUninit := False;
+    end;
   end;
 end;
 
@@ -12484,7 +13700,7 @@ end;
 { Find / Search                                                                }
 { ============================================================================ }
 
-function TfrmMain.GetLineStartOffset(LineIndex: Integer): Int64;
+function TfrmMain.GetLineStartOffset(LineIndex: Int64): Int64;
 var
   OffsetBuf: array[0..19] of AnsiChar;
   S: AnsiString;
@@ -12767,6 +13983,8 @@ begin
 
             if NewContent <> FoundContent then
             begin
+              if not EnsureWritableSession then Continue;
+              if not EnsureOpenFileNotStaleForMutate then Continue;
               RecordForUndo(otEdit, FoundLine, FoundContent);
               CloseFileStreams;
               Op := otEdit;
@@ -12783,14 +14001,27 @@ begin
         fraReplaceAll:
         begin
           if Application.MessageBox(
-            PChar(TrText('Replace all occurrences of "') + Frm.GetFindText + '"?' + #13#10 +
-              TrText('This operation cannot be undone.')),
+            PChar(TrText('Replace all occurrences of "') + Frm.GetFindText + '"?' + #13#10 + #13#10 +
+              TrText('Streaming replace writes a temp file, then swaps it over the original when possible. Free disk space is checked first. A safety limit on match count applies. This cannot be undone.') +
+              iff(Assigned(chkSegmentedHeavyOps) and chkSegmentedHeavyOps.Checked,
+                #13#10 + #13#10 + TrText('Line-segmented mode is ON: Replace All runs on line-aligned parts; matches that span a part boundary may be missed.'),
+                '') + #13#10 + #13#10 +
+              TrText('Continue?')),
             PChar(TrText('Replace All')), MB_YESNO or MB_ICONQUESTION) = IDYES then
           begin
+            if not EnsureWritableSession then Continue;
+            if not EnsureOpenFileNotStaleForMutate then Continue;
             CloseFileStreams;
             TReplaceAllThread.Create(edtFileName.Text,
               Frm.GetFindText, Frm.GetReplaceText,
-              Frm.GetCaseSensitive, Frm.GetWholeWord);
+              Frm.GetCaseSensitive, Frm.GetWholeWord,
+              True, True,
+              Assigned(chkSegmentedHeavyOps) and chkSegmentedHeavyOps.Checked,
+              ExtractFilePath(ParamStr(0)) + 'temp.txt',
+              250000,
+              '',
+              False,
+              True);
             Done := True;
           end;
         end;
@@ -12817,6 +14048,94 @@ begin
     if (N >= 1) and (N <= totalLines) then
       gotoLine(N - 1);
   end;
+end;
+
+function TfrmMain.Line0BasedForFileByte1Based(const Byte1Based: Int64): Int64;
+var
+  SavePos: Int64;
+  Lo, Hi, Mid: Int64;
+  MidStart: Int64;
+begin
+  Result := -1;
+  if (Byte1Based < 1) or (not Assigned(FIndexFileStream)) or (totalLines < 1) then Exit;
+  SavePos := FIndexFileStream.Position;
+  try
+    Lo := 0;
+    Hi := totalLines - 1;
+    while Lo <= Hi do
+    begin
+      Mid := (Lo + Hi) div 2;
+      MidStart := GetLineStartOffset(Mid);
+      if MidStart < 1 then
+      begin
+        Result := -1;
+        Break;
+      end;
+      if MidStart <= Byte1Based then
+      begin
+        Result := Mid;
+        Lo := Mid + 1;
+      end
+      else
+        Hi := Mid - 1;
+    end;
+  finally
+    FIndexFileStream.Position := SavePos;
+  end;
+end;
+
+procedure TfrmMain.DoGotoByteOffset;
+var
+  S: string;
+  B, FileSize1: Int64;
+  Line0: Int64;
+begin
+  S := '';
+  if not Assigned(FIndexFileStream) or (totalLines < 1) then
+  begin
+    Application.MessageBox(PChar(TrText('Please read the file first.')),
+      PChar(TrText('Go to byte offset')), MB_OK or MB_ICONWARNING);
+    Exit;
+  end;
+  if not InputQuery(TrText('Go to byte offset'),
+    TrText('Byte position in file (1-based; $ prefix for hex):'), S) then Exit;
+  S := Trim(S);
+  if S = '' then
+  begin
+    Application.MessageBox(PChar(TrText('Invalid byte position.')),
+      PChar(TrText('Go to byte offset')), MB_OK or MB_ICONWARNING);
+    Exit;
+  end;
+  try
+    B := StrToInt64(S);
+  except
+    Application.MessageBox(PChar(TrText('Invalid byte position.')),
+      PChar(TrText('Go to byte offset')), MB_OK or MB_ICONWARNING);
+    Exit;
+  end;
+  FileSize1 := 0;
+  if Assigned(FSourceFileStream) then
+    FileSize1 := FSourceFileStream.Size;
+  if FileSize1 < 1 then
+  begin
+    Application.MessageBox(PChar(TrText('Please read the file first.')),
+      PChar(TrText('Go to byte offset')), MB_OK or MB_ICONWARNING);
+    Exit;
+  end;
+  if (B < 1) or (B > FileSize1) then
+  begin
+    Application.MessageBox(PChar(TrText('Byte position is out of range for this file.')),
+      PChar(TrText('Go to byte offset')), MB_OK or MB_ICONWARNING);
+    Exit;
+  end;
+  Line0 := Line0BasedForFileByte1Based(B);
+  if Line0 < 0 then
+  begin
+    Application.MessageBox(PChar(TrText('Could not resolve line for that byte position.')),
+      PChar(TrText('Go to byte offset')), MB_OK or MB_ICONWARNING);
+    Exit;
+  end;
+  gotoLine(Line0);
 end;
 
 procedure TfrmMain.StartFindFromPos(const AStartPos: Int64; const ADirection: Integer);
@@ -12849,7 +14168,7 @@ begin
     Exit;
   end;
   Inc(FFindSearchId);
-  UpdateStatusBar('Searching...', iaRight);
+  UpdateStatusBar(TrText('Searching...'), iaRight);
   FFindThread := TFindInFileThread.Create(Self, edtFileName.Text, IndexFileName, FFindText, FFindCaseSensitive, AStartPos, ADirection, FFindSearchId);
 end;
 
@@ -13124,7 +14443,7 @@ begin
       Bk := clWindow;
       Fg := clWindowText;
       if IsBookmarked(LineIdx) then
-        Bk := $00FFF0E0;
+        Bk := FF_BOOKMARK_ROW_BG;
     end;
     Sender.Canvas.Font.Assign(ListView1.Font);
     Sender.Canvas.Brush.Style := bsSolid;
@@ -13167,7 +14486,7 @@ begin
   if (RealLine >= 0) and IsBookmarked(RealLine) then
   begin
     if not ListViewItemIndexIsSelected(Sender, Item.Index) then
-      Sender.Canvas.Brush.Color := $00FFF0E0;
+      Sender.Canvas.Brush.Color := FF_BOOKMARK_ROW_BG;
   end;
 end;
 
@@ -13280,6 +14599,8 @@ begin
     UpdateStatusBar('Nothing to undo', iaRight);
     Exit;
   end;
+  if not EnsureWritableSession then Exit;
+  if not EnsureOpenFileNotStaleForMutate then Exit;
   P := PUndoRecord(FUndoStack[FUndoStack.Count - 1]);
   FUndoStack.Delete(FUndoStack.Count - 1);
   if not Assigned(FRedoStack) then FRedoStack := TList.Create;
@@ -13323,6 +14644,8 @@ begin
     UpdateStatusBar('Nothing to redo', iaRight);
     Exit;
   end;
+  if not EnsureWritableSession then Exit;
+  if not EnsureOpenFileNotStaleForMutate then Exit;
   P := PUndoRecord(FRedoStack[FRedoStack.Count - 1]);
   FRedoStack.Delete(FRedoStack.Count - 1);
   if not Assigned(FUndoStack) then FUndoStack := TList.Create;
@@ -13365,6 +14688,8 @@ begin
     FTailActive := False;
     tmrTail.Enabled := False;
     UpdateStatusBar('Tail OFF', iaRight);
+    if Assigned(FToolsExtrasTail) then
+      FToolsExtrasTail.Checked := False;
   end else begin
     if Trim(edtFileName.Text) = '' then begin ShowMessage('Please select a file first.'); Exit; end;
     if not FileExists(edtFileName.Text) then begin ShowMessage('File not found.'); Exit; end;
@@ -13376,6 +14701,8 @@ begin
     UpdateStatusBar('Tail ON', iaRight);
     if totalLines > 0 then
       gotoLine(totalLines - 1);
+    if Assigned(FToolsExtrasTail) then
+      FToolsExtrasTail.Checked := True;
   end;
 end;
 
@@ -13404,12 +14731,19 @@ begin
 end;
 
 procedure TfrmMain.TailAppendNewLines;
+const
+  { GetMem / TStream.Read use Integer count in Delphi 7; tail growth can be GB.
+    Chunked read preserves correctness and avoids silent truncation / negative sizes. }
+  MAX_TAIL_READ_CHUNK = 64 * 1024 * 1024;
 var
   SourceFile: TFileStream;
   IndexFile: TFileStream;
   IndexPath: string;
   OldSize, NewSize: Int64;
   DeltaSize: Int64;
+  ChunkOff: Int64;
+  ChunkLeft: Int64;
+  ChunkThis: Integer;
   Buffer: PAnsiChar;
   BytesRead: Integer;
   I: Integer;
@@ -13441,32 +14775,45 @@ begin
       DeltaSize := NewSize - OldSize;
       IndexFile := TFileStream.Create(IndexPath, fmOpenReadWrite or fmShareDenyNone);
       IndexFile.Seek(0, soFromEnd);
-      GetMem(Buffer, DeltaSize);
-      try
-        SourceFile.Seek(OldSize, soFromBeginning);
-        BytesRead := SourceFile.Read(Buffer^, DeltaSize);
-        NewLines := 0;
-        for I := 0 to BytesRead - 1 do
-        begin
-          if Buffer[I] = #10 then begin
-            Inc(NewLines);
-            AbsOffset := OldSize + I + 2;
-            for J := 0 to 17 do OffsetBuf[J] := ' ';
-            TempVal := AbsOffset;
-            J := 17;
-            repeat
-              Digit := TempVal mod 10;
-              OffsetBuf[J] := AnsiChar(Byte('0') + Digit);
-              TempVal := TempVal div 10;
-              Dec(J);
-            until (TempVal = 0) or (J < 0);
-            OffsetBuf[18] := #13;
-            OffsetBuf[19] := #10;
-            IndexFile.Write(OffsetBuf, 20);
+      NewLines := 0;
+      ChunkOff := 0;
+      while ChunkOff < DeltaSize do
+      begin
+        ChunkLeft := DeltaSize - ChunkOff;
+        if ChunkLeft > MAX_TAIL_READ_CHUNK then
+          ChunkThis := MAX_TAIL_READ_CHUNK
+        else
+          ChunkThis := Integer(ChunkLeft);
+        GetMem(Buffer, ChunkThis);
+        try
+          SourceFile.Seek(OldSize + ChunkOff, soFromBeginning);
+          BytesRead := SourceFile.Read(Buffer^, ChunkThis);
+          if BytesRead <= 0 then Break;
+          for I := 0 to BytesRead - 1 do
+          begin
+            if Buffer[I] = #10 then begin
+              Inc(NewLines);
+              AbsOffset := OldSize + ChunkOff + I + 2;
+              for J := 0 to 17 do OffsetBuf[J] := ' ';
+              TempVal := AbsOffset;
+              J := 17;
+              repeat
+                Digit := TempVal mod 10;
+                OffsetBuf[J] := AnsiChar(Byte('0') + Digit);
+                TempVal := TempVal div 10;
+                Dec(J);
+              until (TempVal = 0) or (J < 0);
+              OffsetBuf[18] := #13;
+              OffsetBuf[19] := #10;
+              IndexFile.Write(OffsetBuf, 20);
+            end;
           end;
+          Inc(ChunkOff, BytesRead);
+          if BytesRead < ChunkThis then Break;
+        finally
+          FreeMem(Buffer);
+          Buffer := nil;
         end;
-      finally
-        FreeMem(Buffer);
       end;
       FTailLastFileSize := NewSize;
       FTailLastLineCount := FTailLastLineCount + NewLines;
@@ -13497,20 +14844,45 @@ end;
 procedure TfrmMain.DoFilterDialog;
 var
   S: string;
+  Mode: TFilterMatchMode;
+  Pick: Integer;
+  CS: Boolean;
 begin
   if FFilterActive then begin
     ClearFilter;
-    UpdateStatusBar('Filter cleared', iaRight);
+    UpdateStatusBar(TrText('Filter cleared.'), iaRight);
     Exit;
   end;
   S := FFilterText;
-  if not InputQuery(TrText('Filter / Grep'), TrText('Show only lines containing:'), S) then Exit;
+  if not InputQuery(TrText('Filter / Grep'), TrText('Show only lines matching (text or regex pattern):'), S) then Exit;
   S := Trim(S);
   if S = '' then Exit;
-  StartFilter(S, False);
+  Pick := MessageDlg(
+    TrText('Filter match mode: Yes = line starts with, No = contains, OK = regex (VBScript). Cancel = abort.'),
+    mtConfirmation, [mbYes, mbNo, mbOK, mbCancel], 0);
+  if Pick = mrCancel then Exit;
+  if Pick = mrYes then
+    Mode := fmmPrefix
+  else if Pick = mrNo then
+    Mode := fmmContains
+  else
+    Mode := fmmRegex;
+
+  CS := False;
+  if Mode = fmmRegex then
+  begin
+    Pick := MessageDlg(
+      TrText('Regular expression: match case? (Yes = case sensitive, No = ignore case)'),
+      mtConfirmation, [mbYes, mbNo, mbCancel], 0);
+    if Pick = mrCancel then Exit;
+    CS := (Pick = mrYes);
+  end;
+
+  StartFilter(S, CS, Mode);
 end;
 
-procedure TfrmMain.StartFilter(const AText: String; ACaseSensitive: Boolean);
+procedure TfrmMain.StartFilter(const AText: String; ACaseSensitive: Boolean;
+  const AMatchMode: TFilterMatchMode);
 var
   IndexPath: String;
   FilterTotalLines: Int64;
@@ -13531,8 +14903,36 @@ begin
   else begin ShowMessage('Please read the file first.'); Exit; end;
   if FilterTotalLines <= 0 then Exit;
   FFilterText := AText;
-  UpdateStatusBar('Filtering...', iaRight);
-  FFilterThread := TFilterThread.Create(Self, edtFileName.Text, IndexPath, AText, ACaseSensitive, FilterTotalLines);
+  UpdateStatusBar(TrText('Filtering...'), iaRight);
+  FFilterThread := TFilterThread.Create(Self, edtFileName.Text, IndexPath, AText, ACaseSensitive, FilterTotalLines, AMatchMode);
+end;
+
+procedure TfrmMain.UpdateFilterBuildProgress(const LinesDone, TotalLines: Int64);
+begin
+  UpdateStatusBar(TrText('Filtering') + ' ' + UnUtils.FormatNumber(LinesDone) + ' / ' +
+    UnUtils.FormatNumber(TotalLines) + ' ' + TrText('lines'), iaRight);
+end;
+
+procedure TfrmMain.FinishFilterThreadFailed(const AMsg: string);
+begin
+  FFilterThread := nil;
+  if Assigned(FFilterBits) then begin FreeMem(FFilterBits); FFilterBits := nil; end;
+  FFilterBitsSize := 0;
+  FFilterActive := False;
+  FFilteredCount := 0;
+  FFilterTotalLines := 0;
+  SetLength(FFilterJumpTable, 0);
+  if Assigned(ListView1) and Assigned(FIndexFileStream) then begin
+    ListView1Resize(ListView1);
+    ListView1.Invalidate;
+  end;
+  UpdateInfoPanels;
+  SyncScrollBarsForFilterMode;
+  if isChecked then
+    showChecked;
+  if AMsg <> '' then
+    Application.MessageBox(PChar(AMsg), PChar(TrText('Filter / Grep')), MB_OK or MB_ICONWARNING);
+  UpdateStatusBar(TrText('Ready'), iaRight);
 end;
 
 procedure TfrmMain.FilterThreadDone;
@@ -13559,7 +14959,7 @@ begin
       SelectListViewItem(0);
     end;
   end;
-  UpdateStatusBar(Format('Filter: %d/%d', [FFilteredCount, FFilterTotalLines]), iaRight);
+  UpdateStatusBar(Format(TrText('Filter: %d/%d'), [FFilteredCount, FFilterTotalLines]), iaRight);
   UpdateInfoPanels;
   SyncScrollBarsForFilterMode;
 end;
@@ -13581,7 +14981,7 @@ begin
     ListView1Resize(ListView1);
     ListView1.Invalidate;
   end;
-  UpdateStatusBar('Ready', iaRight);
+  UpdateStatusBar(TrText('Ready'), iaRight);
   UpdateInfoPanels;
   SyncScrollBarsForFilterMode;
   if isChecked then
@@ -14028,17 +15428,29 @@ procedure TfrmMain.ShowHelpDialog;
 const
   CRLF = #13#10;
   SEP = '---------------------------------------------------------------';
+  MK_HELP_GOTO_BYTE = '<<<FF_HELP_GOTO_BYTE>>>';
+  MK_HELP_FILTER_ROW = '<<<FF_HELP_FILTER_ROW>>>';
+  MK_HELP_FILTER_FEATURE = '<<<FF_HELP_FILTER_FEATURE>>>';
+  MK_HELP_READONLY_ROW = '<<<FF_HELP_READONLY_ROW>>>';
+  MK_HELP_MENUBAR_L1 = '<<<FF_HELP_MENUBAR_L1>>>';
+  MK_HELP_MENUBAR_L2 = '<<<FF_HELP_MENUBAR_L2>>>';
+  MK_HELP_VIEW_ZOOM_IN = '<<<FF_HELP_VIEW_ZOOM_IN>>>';
+  MK_HELP_VIEW_ZOOM_OUT = '<<<FF_HELP_VIEW_ZOOM_OUT>>>';
+  MK_HELP_COMPARE_MERGE = '<<<FF_HELP_COMPARE_MERGE>>>';
+  MK_HELP_COMPARE_MERGE_RELOAD_1 = '<<<FF_HELP_COMPARE_MERGE_RELOAD_1>>>';
+  MK_HELP_COMPARE_MERGE_RELOAD_2 = '<<<FF_HELP_COMPARE_MERGE_RELOAD_2>>>';
   HELP_TEXT =
     'HIGH PERFORMANCE FILE PROCESSOR  -  FastFile' + CRLF +
     'Version 2.0' + CRLF +
     SEP + CRLF + CRLF +
     'KEYBOARD SHORTCUTS' + CRLF +
     SEP + CRLF +
-    '  Barra de menus: letra sublinhada = Alt+letra (ex.: Alt+F, Alt+O).' + CRLF +
-    '  Atalhos Ctrl+... aparecem a direita em cada comando do menu.' + CRLF + CRLF +
+    MK_HELP_MENUBAR_L1 + CRLF +
+    MK_HELP_MENUBAR_L2 + CRLF + CRLF +
     '  Ctrl+P ............. Open Options menu (dropdown)' + CRLF +
     '  Ctrl+O ............. Open file (browse)' + CRLF +
     '  Ctrl+R ............. Recent files list' + CRLF +
+    MK_HELP_READONLY_ROW + CRLF +
     '  Ctrl+W ............. Toggle Word Wrap' + CRLF +
     '  Encoding combo ..... List view: how to decode bytes (UTF-8 / ANSI / UTF-16)' + CRLF +
     '  Ctrl+F ............. Find text' + CRLF +
@@ -14046,6 +15458,7 @@ const
     '  F3 ................. Find next' + CRLF +
     '  Shift+F3 ........... Find previous' + CRLF +
     '  Ctrl+G ............. Go to line' + CRLF +
+    MK_HELP_GOTO_BYTE + CRLF +
     '  Ctrl+Z ............. Undo last edit' + CRLF +
     '  Ctrl+Y ............. Redo' + CRLF +
     '  Ctrl+C ............. Copy selection to clipboard' + CRLF +
@@ -14057,9 +15470,9 @@ const
     '  F2 ................. Go to next bookmark' + CRLF +
     '  Shift+F2 ........... Go to previous bookmark' + CRLF +
     '  Ctrl+Shift+B ....... Clear all bookmarks' + CRLF +
-    '  Esc ................ Clear active filter (also refreshes Select/checklist view)' + CRLF +
+    '  Esc ................ Cancel in-flight Find; else clear filter / selection' + CRLF +
     '  F1 ................. This help window' + CRLF +
-    '  Filter (Ctrl+L) .... Same shortcuts as below while the filtered list is focused' + CRLF +
+    MK_HELP_FILTER_ROW + CRLF +
     '  Select (checkboxes)  Same shortcuts while the checklist has focus (btn Checkboxes)' + CRLF + CRLF +
     'READ PANEL & TOOLBAR (pnlButtons)' + CRLF +
     SEP + CRLF +
@@ -14069,8 +15482,16 @@ const
     '  Ctrl+Shift+F ....... Find in Files' + CRLF +
     '  Ctrl+Shift+K ....... Split Files' + CRLF +
     '  Ctrl+Shift+M ....... Merge lines' + CRLF +
-    '  Ctrl+Shift+S ....... Select (checkbox list)' + CRLF +
+    '  Ctrl+Shift+J ....... Merge files (insert source into destination)' + CRLF +
+    MK_HELP_COMPARE_MERGE + CRLF +
+    MK_HELP_COMPARE_MERGE_RELOAD_1 + CRLF +
+    MK_HELP_COMPARE_MERGE_RELOAD_2 + CRLF +
+    '  Ctrl+Shift+P ....... Split file into equal parts (LF-safe)' + CRLF +
+    '  Ctrl+Shift+S ....... Select (checkbox list) (View menu)' + CRLF +
+    MK_HELP_VIEW_ZOOM_IN + CRLF +
+    MK_HELP_VIEW_ZOOM_OUT + CRLF +
     '  Ctrl+Shift+I ....... Insert line (line editor)' + CRLF +
+    '  Ctrl+Shift+U ....... Duplicate line (line editor)' + CRLF +
     '  Ctrl+Shift+E ....... Edit line (line editor)' + CRLF +
     '  Ctrl+Shift+D ....... Delete line (line editor)' + CRLF +
     '  Ctrl+Shift+O ....... Export' + CRLF +
@@ -14088,7 +15509,9 @@ const
     '[2] FIND & REPLACE  (Ctrl+F / Ctrl+H)' + CRLF +
     '  Background thread search (Boyer-Moore-Horspool).' + CRLF +
     '  Case sensitive/insensitive. F3/Shift+F3 navigation.' + CRLF +
-    '  Ctrl+H opens Find & Replace dialog with Replace All.' + CRLF + CRLF +
+    '  Esc cancels an in-flight Find; status bar shows bytes scanned / file size.' + CRLF +
+    '  Ctrl+H opens Find & Replace dialog with Replace All.' + CRLF +
+    '  In that dialog: Alt+N Find Next, Alt+R Replace, Alt+L Replace All, Alt+C Close.' + CRLF + CRLF +
     '[3] ENCODING DETECTION  (BOM)' + CRLF +
     '  Detects UTF-8, UTF-16 LE/BE, UTF-32 LE/BE, ANSI.' + CRLF + CRLF +
     '[4] UNDO / REDO  (Ctrl+Z / Ctrl+Y)' + CRLF +
@@ -14098,12 +15521,11 @@ const
     '  500ms polling, incremental index append.' + CRLF + CRLF +
     '[6] FILTER / GREP' + CRLF +
     '  Background thread filter with bitset + jump table.' + CRLF +
-    '  Minimal memory: ~1.25 MB for 10M lines.' + CRLF + CRLF +
+    '  Minimal memory: ~1.25 MB for 10M lines.' + CRLF +
+    MK_HELP_FILTER_FEATURE + CRLF + CRLF +
     '[7] BOOKMARKS  (Ctrl+B)' + CRLF +
     '  Toggle, navigate (F2/Shift+F2), clear all.' + CRLF +
-    '  Sorted binary search, max 10,000.' + CRLF + CRLF +
-    SEP + CRLF +
-    'Developed with Delphi 7  |  Performance-first design' + CRLF +
+    '  Soft row tint + thin accent bar (checkbox list); max 10,000.' + CRLF + CRLF +
     SEP;
 var
   Frm: TForm;
@@ -14112,10 +15534,11 @@ var
   SD: TSaveDialog;
   MR: Integer;
   BtnW, TotalW, StartX: Integer;
+  HelpBody: string;
 begin
   Frm := TForm.Create(nil);
   try
-    Frm.Caption := TrText('FastFile - Help & Feature Reference');
+    Frm.Caption := 'FastFile - Help & Feature Reference';
     Frm.Width := 620;
     Frm.Height := 560;
     Frm.Position := poScreenCenter;
@@ -14138,13 +15561,36 @@ begin
     Memo.Font.Color := clBlack;
     Memo.Color := $00FAFAFA;
     Memo.WordWrap := True;
-    Memo.Text := HELP_TEXT;
+    HelpBody := HELP_TEXT;
+    HelpBody := StringReplace(HelpBody, MK_HELP_GOTO_BYTE,
+      '  Ctrl+Shift+G .... Go to byte offset (1-based file position; $ = hex)', [rfReplaceAll]);
+    HelpBody := StringReplace(HelpBody, MK_HELP_FILTER_ROW,
+      '  Filter (Ctrl+L) .... View over index; Yes=prefix / No=contains / OK=VBScript regex', [rfReplaceAll]);
+    HelpBody := StringReplace(HelpBody, MK_HELP_FILTER_FEATURE,
+      '  Filter is view-only (no disk rewrite). Regex uses Windows VBScript.RegExp on each line preview.', [rfReplaceAll]);
+    HelpBody := StringReplace(HelpBody, MK_HELP_READONLY_ROW,
+      '  Ctrl+Alt+R ........ Toggle read-only session (blocks disk writes from the Read tab)', [rfReplaceAll]);
+    HelpBody := StringReplace(HelpBody, MK_HELP_MENUBAR_L1,
+      '  ' + 'Menu bar: Underlined letter = Alt+letter (example: Alt+F, E, V, O for File, Edit, View, Options).', [rfReplaceAll]);
+    HelpBody := StringReplace(HelpBody, MK_HELP_MENUBAR_L2,
+      '  ' + 'Ctrl+ shortcuts are shown to the right of each menu command.', [rfReplaceAll]);
+    HelpBody := StringReplace(HelpBody, MK_HELP_VIEW_ZOOM_IN,
+      '  Ctrl+Num+ .......... Zoom in list font (View menu)', [rfReplaceAll]);
+    HelpBody := StringReplace(HelpBody, MK_HELP_VIEW_ZOOM_OUT,
+      '  Ctrl+Num- .......... Zoom out list font (View menu)', [rfReplaceAll]);
+    HelpBody := StringReplace(HelpBody, MK_HELP_COMPARE_MERGE,
+      '  Ctrl+Shift+H ....... Compare / merge + session history (two-file diff, journal)', [rfReplaceAll]);
+    HelpBody := StringReplace(HelpBody, MK_HELP_COMPARE_MERGE_RELOAD_1,
+      '  Session history Reload: a worker thread reads the journal tail, filters lines, loads the preview file and optional color scan; the progress bar covers that work first, then filling the memo and list on the UI thread.', [rfReplaceAll]);
+    HelpBody := StringReplace(HelpBody, MK_HELP_COMPARE_MERGE_RELOAD_2,
+      '  The loading overlay is not stay-on-top, and the UI yields often (including a short wait for queued input) so you can use Alt+Tab and other applications during a long reload.', [rfReplaceAll]);
+    Memo.Text := HelpBody;
     BtnW := 120;
     TotalW := BtnW * 3 + 16;
     StartX := (Frm.ClientWidth - TotalW) div 2;
     BtnCopy := TButton.Create(Frm);
     BtnCopy.Parent := Frm;
-    BtnCopy.Caption := TrText('&Copy');
+    BtnCopy.Caption := '&Copy';
     BtnCopy.Width := BtnW;
     BtnCopy.Height := 28;
     BtnCopy.Left := StartX;
@@ -14153,7 +15599,7 @@ begin
     BtnCopy.ModalResult := mrYes;
     BtnExport := TButton.Create(Frm);
     BtnExport.Parent := Frm;
-    BtnExport.Caption := TrText('&Export...');
+    BtnExport.Caption := '&Export...';
     BtnExport.Width := BtnW;
     BtnExport.Height := 28;
     BtnExport.Left := StartX + BtnW + 8;
@@ -14180,7 +15626,7 @@ begin
       end else if MR = mrRetry then begin
         SD := TSaveDialog.Create(nil);
         try
-          SD.Title := 'Export Help Content';
+          SD.Title := TrText('Export Help Content');
           SD.Filter := 'Text files (*.txt)|*.txt|All files (*.*)|*.*';
           SD.DefaultExt := 'txt';
           SD.FileName := 'FastFile_Help.txt';
@@ -14256,6 +15702,17 @@ begin
   end;
   FHandlingReadShortcut := True;
   try
+  { ESC: cancel background Find (antes de limpar filtro / selecao) }
+  if (Key = VK_ESCAPE) and (Shift = []) and Assigned(FFindThread) then
+  begin
+    Inc(FFindSearchId);
+    FFindThread.Terminate;
+    FFindThread := nil;
+    UpdateStatusBar(TrText('Search cancelled.'), iaRight);
+    Key := 0;
+    Exit;
+  end;
+
   { Ctrl+1 / teclado numerico: mostrar separador Read file (btnShowTabReadFile) }
   if ((Key = Ord('1')) or (Key = VK_NUMPAD1)) and (Shift = [ssCtrl]) then begin
     if Assigned(btnShowTabReadFile) then btnShowTabReadFileClick(btnShowTabReadFile);
@@ -14297,6 +15754,18 @@ begin
           if Assigned(btnMergeMultipleLines) and btnMergeMultipleLines.Enabled then btnMergeMultipleLinesClick(btnMergeMultipleLines);
           Key := 0; Exit;
         end;
+      Ord('J'), Ord('j'):
+        begin
+          EnsureReadTabVisible;
+          miMergeFilesClick(Self);
+          Key := 0; Exit;
+        end;
+      Ord('P'), Ord('p'):
+        begin
+          EnsureReadTabVisible;
+          miSplitEqualPartsClick(Self);
+          Key := 0; Exit;
+        end;
       Ord('S'), Ord('s'):
         begin
           if Assigned(btnCheckBoxes) and btnCheckBoxes.Enabled then btnCheckBoxesClick(btnCheckBoxes);
@@ -14305,6 +15774,11 @@ begin
       Ord('I'), Ord('i'):
         begin
           if Assigned(btnEditFile) and btnEditFile.Enabled then editFile(otInsert);
+          Key := 0; Exit;
+        end;
+      Ord('U'), Ord('u'):
+        begin
+          if Assigned(btnEditFile) and btnEditFile.Enabled then editFile(otDuplicate);
           Key := 0; Exit;
         end;
       Ord('E'), Ord('e'):
@@ -14332,6 +15806,12 @@ begin
           if Assigned(btnConsumerAI) and btnConsumerAI.Enabled then btnConsumerAIClick(btnConsumerAI);
           Key := 0; Exit;
         end;
+      Ord('H'), Ord('h'):
+        begin
+          EnsureReadTabVisible;
+          miCompareMergeHistoryClick(Self);
+          Key := 0; Exit;
+        end;
     end;
   end;
 
@@ -14346,15 +15826,22 @@ begin
     Exit;
   end;
 
-  // Ctrl+R -> Mostrar arquivos recentes
-  if (Key = Ord('R')) and (ssCtrl in Shift) then begin
+  { Ctrl+Alt+R -> sessao somente leitura (Ctrl+R fica para arquivos recentes) }
+  if (Key = Ord('R')) and (Shift = [ssCtrl, ssAlt]) then begin
+    miToggleReadOnlyClick(Self);
+    Key := 0;
+    Exit;
+  end;
+
+  // Ctrl+R -> Mostrar arquivos recentes [somente Ctrl, sem Shift/Alt]
+  if (Key = Ord('R')) and (Shift = [ssCtrl]) then begin
     ShowRecentFilesMenu;
     Key := 0;
     Exit;
   end;
 
-  // Ctrl+W -> Alternar Word Wrap (visual)
-  if (Key = Ord('W')) and (ssCtrl in Shift) and not (ssShift in Shift) then begin
+  // Ctrl+W -> Alternar Word Wrap (visual) [somente Ctrl]
+  if (Key = Ord('W')) and (Shift = [ssCtrl]) then begin
     if Assigned(chkWordWrap) then begin
       chkWordWrap.Checked := not chkWordWrap.Checked;
       chkWordWrapClick(chkWordWrap);
@@ -14385,6 +15872,15 @@ begin
     EnsureReadTabVisible;
     FocusPrimaryReadView;
     DoFindReplace;
+    Key := 0;
+    Exit;
+  end;
+
+  // Ctrl+Shift+G -> Go to byte offset
+  if (Key = Ord('G')) and (ssCtrl in Shift) and (ssShift in Shift) and not (ssAlt in Shift) then begin
+    EnsureReadTabVisible;
+    FocusPrimaryReadView;
+    DoGotoByteOffset;
     Key := 0;
     Exit;
   end;
@@ -14545,7 +16041,7 @@ begin
   if (Key = VK_ESCAPE) and (Shift = []) then begin
     if FFilterActive then begin
       ClearFilter;
-      UpdateStatusBar('Filter cleared', iaRight);
+      UpdateStatusBar(TrText('Filter cleared.'), iaRight);
       Key := 0;
       Exit;
     end;
@@ -14574,15 +16070,23 @@ begin
 
   { ESC tambem fecha a aba ativa no pgMain quando nao foi consumido
     (ex.: sem filtro/sele??o no painel Read). }
-  if (Key = VK_ESCAPE) and (Shift = []) and Assigned(pgMain)
-    and pgMain.Visible and (pgMain.PageCount > 0)
-    and Assigned(pgMain.ActivePage) and pgMain.ActivePage.TabVisible then
+  if (Key = VK_ESCAPE) and (Shift = []) and Assigned(pgMain) then
   begin
-    if pgMain.ActivePageIndex = TAB_READ_FILE_INDEX then
-      HideTabs
-    else
-      HideTabs(showOtherTabs);
-    Key := 0;
+    if pgMain.Visible and (pgMain.PageCount > 0)
+      and Assigned(pgMain.ActivePage) and pgMain.ActivePage.TabVisible then
+    begin
+      if pgMain.ActivePageIndex = TAB_READ_FILE_INDEX then
+        HideTabs
+      else
+        HideTabs(showOtherTabs);
+      Key := 0;
+    end
+    else if not pgMain.Visible then
+    begin
+      { Painel de abas oculto: ESC fecha a aplicacao (FormCloseQuery continua a aplicar). }
+      Close;
+      Key := 0;
+    end;
   end;
 end;
 
@@ -14594,4 +16098,5 @@ begin
 end;
 
 end.
+
 
