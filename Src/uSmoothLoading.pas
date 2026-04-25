@@ -12,6 +12,7 @@ type
     pnlContainer: TPanel;
     imgLogo: TImage;
     lblMessage: TLabel;
+    lblDetail: TLabel;
     tmrAnimation: TTimer;
     pbProgressBar: TPaintBox;
     procedure tmrAnimationTimer(Sender: TObject);
@@ -33,6 +34,8 @@ type
     FFadeEndAlpha: Byte;
     procedure BuildBackground;
     procedure WMEraseBkgnd(var Msg: TWMEraseBkgnd); message WM_ERASEBKGND;
+    procedure ApplySmoothProgress(Percent: Integer);
+    procedure WMSmoothProgress(var Msg: TMessage); message WM_APP + 77;
     procedure CenterContainer;
     procedure RoundControl(Control: TWinControl; Radius: Integer);
     procedure LoadLogo;
@@ -72,9 +75,18 @@ type
     constructor Create; reintroduce;
 
     // API pública (mantém compatibilidade com o projeto)
-    class procedure ShowLoading(const MessageText: String);
+    class procedure ShowLoading(const MessageText: String); overload;
+    { AStayOnTop=False: overlay nao WS_EX_TOPMOST (Alt+Tab / outras apps menos "presas" durante carga longa). }
+    class procedure ShowLoading(const MessageText: String; AStayOnTop: Boolean); overload;
+    { AOwner=form modal (ex. compare/merge): overlay como filho logico do form evita bloqueio da fila de mensagens. }
+    class procedure ShowLoading(AOwner: TComponent; const MessageText: String; AStayOnTop: Boolean = True); overload;
     class procedure HideLoading;
     class procedure UpdateProgress(Percent: Integer);
+    { Chamada a partir de threads de trabalho: PostMessage (nao bloqueia a worker na UI).
+      UpdateProgress usa SendMessage fora da main ? util para outras threads; esta API evita
+      acumular Synchronize na fila do Application durante cargas longas (ex.: historico merge). }
+    class procedure PostProgressFromWorker(Percent: Integer);
+    class procedure UpdateProgressWithDetail(Percent: Integer; const Detail: string);
   end;
 
 const
@@ -183,27 +195,35 @@ type
     FOperation: TOperationType;
     FTargetLine: Int64;
     FContent: String;
+    FOldLineText: String;
     FTotalSize: Int64;
     FBytesProcessed: Int64;
     FCurrentPercent: Integer;
     FPercentToSync: Integer;
+    { Ultimo progresso sincronizado em mil-esimos (0..1000); mais passos que % inteiro. }
+    FLastProgressThousandths: Integer;
     FSuccess: Boolean;
     FErrorMsg: String;
     FTempFileName: String;
+    FQuietFinish: Boolean;
+      FIsRawContent: Boolean;
     procedure SyncShowLoading;
     procedure SyncHideLoading;
     procedure SyncSetProgress;
     procedure SyncProgress;
     procedure SyncError;
-    procedure FinishThread;
-
-
+    procedure FinishThread;    
   protected
     procedure Execute; override;
   public
     constructor Create(const AFileName: String; const Op: TOperationType; const LineNum: Int64; const Txt: String;
-    const AutoHide: Boolean = True; const ShowUI: Boolean = True);
+    const AutoHide: Boolean = True; const ShowUI: Boolean = True;
+    const AFreeOnTerminate: Boolean = True; const AQuietFinish: Boolean = False; const AIsRawContent: Boolean = False);
     destructor Destroy; override;
+    property EditSucceeded: Boolean read FSuccess;
+    property EditErrorMsg: String read FErrorMsg;
+    class function RunEditWait(const AFileName: String; const Op: TOperationType;
+      const LineNum: Int64; const Txt: String; const AIsRawContent: Boolean = False): Boolean;
   end;
 
   TExportFileThread = class(TThread)
@@ -259,6 +279,14 @@ type
     FTempFileName: String;
     FReplacedCount: Int64;
     FReplacedCountSync: Int64;
+    FReplaceLimitHit: Boolean;
+    FDetailSync: string;
+    FSegmented: Boolean;
+    FIndexFileName: string;
+    FLinesPerSegment: Integer;
+    FOutputOverride: string;
+    FSilent: Boolean;
+    function TrySegmentedReplace: Boolean;
     procedure SyncShowLoading;
     procedure SyncHideLoading;
     procedure SyncSetProgress;
@@ -270,8 +298,16 @@ type
   public
     constructor Create(const AFileName, AFindText, AReplaceText: String;
       const ACaseSensitive, AWholeWord: Boolean;
-      const AutoHide: Boolean = True; const ShowUI: Boolean = True);
+      const AutoHide: Boolean = True; const ShowUI: Boolean = True;
+      const ASegmented: Boolean = False; const AIndexFileName: string = '';
+      const ALinesPerSegment: Integer = 250000;
+      const AOutputOverride: string = '';
+      const ASilent: Boolean = False;
+      const AFreeOnTerminate: Boolean = True);
     destructor Destroy; override;
+    property ReplacedTotal: Int64 read FReplacedCountSync;
+    property OperationSucceeded: Boolean read FSuccess;
+    property LastErrorMsg: string read FErrorMsg;
   end;
 
   TSplitEntry = record
@@ -347,7 +383,46 @@ type
     destructor Destroy; override;
   end;
 
+  { Divide arquivo em N partes com tamanho aproximadamente igual em bytes,
+    ajustando limites para nunca cortar linhas (delimitador LF #10). }
+  TSplitEqualPartsThread = class(TThread)
+  private
+    FAutoHide: Boolean;
+    FShowLoadingUI: Boolean;
+    FLoadingMsg: string;
+    FProgressToSet: Integer;
+    sw: TStopWatch;
+    FSourceFileName: String;
+    FPartCount: Integer;
+    FCurrentPercent: Integer;
+    FPercentToSync: Integer;
+    FSuccess: Boolean;
+    FErrorMsg: String;
+    FSuccessOutputDir: String;
+    FSuccessFirstPath: String;
+    FSuccessLastPath: String;
+    procedure SyncShowLoading;
+    procedure SyncHideLoading;
+    procedure SyncSetProgress;
+    procedure SyncProgress;
+    procedure SyncError;
+    procedure SyncFinish;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const ASourceFileName: String; const APartCount: Integer;
+      const AutoHide: Boolean = True; const ShowUI: Boolean = True);
+    destructor Destroy; override;
+  end;
+
 function PosBMH(const SubStr, S: string): Integer;
+
+{ Line-aligned segments + merge + atomic rename. Returns False if index missing
+  or a single segment (caller uses classic in-place deletes). Returns True with
+  AErrorMsg set on handled failure or empty on success. }
+function TrySegmentedBatchDelete(const FileName, IndexFileName: string;
+  const LinesToDelete1Based: array of Int64; LinesPerSegment: Integer;
+  out AErrorMsg: string): Boolean;
 
 var
   frmSmoothLoading: TfrmSmoothLoadingForm;
@@ -359,7 +434,18 @@ implementation
 {$R *.dfm}
 
 uses
-  MainUnit, UnBufferedTextWriter, ThreadFileLog, uI18n;
+  MainUnit, UnBufferedTextWriter, ThreadFileLog, uI18n, UnUtils, uFileSessionHistory;
+
+const
+  REPLACE_ALL_MATCH_LIMIT = 5000000;
+  { QS_ALLINPUT (WinUser): acordar MsgWait quando ha mensagens para Synchronize / pintura. }
+  cQS_ALLINPUT_FOR_WAIT = $04FF;
+
+function NewFastFileTemp(const Tag: string): string;
+begin
+  Result := IncludeTrailingPathDelimiter(ExtractFilePath(ParamStr(0))) +
+    'ff_' + Tag + '_' + IntToStr(GetTickCount) + '_' + IntToStr(GetCurrentThreadId) + '.tmp';
+end;
 
 procedure ShowMessage(const Msg: string); overload;
 begin
@@ -675,14 +761,18 @@ end;
 { ============================================================================ }
 
 constructor TEditFileThread.Create(const AFileName: String; const Op: TOperationType; const LineNum: Int64; const Txt: String;
-    const AutoHide: Boolean = True; const ShowUI: Boolean = True);
+    const AutoHide: Boolean = True; const ShowUI: Boolean = True;
+    const AFreeOnTerminate: Boolean = True; const AQuietFinish: Boolean = False; const AIsRawContent: Boolean = False);
 begin
   inherited Create(True);
-  FreeOnTerminate := True;
+  FreeOnTerminate := AFreeOnTerminate;
   FFileName := AFileName;
   FOperation := Op;
   FTargetLine := LineNum;
   FContent := Txt;
+  FOldLineText := '';
+  FQuietFinish := AQuietFinish;
+  FIsRawContent := AIsRawContent;
   FAutoHide := AutoHide;
   FShowLoadingUI := ShowUI;
   if FShowLoadingUI then
@@ -749,16 +839,82 @@ begin
 
   if FSuccess then
   begin
-    TimeStr := Format(INFO_EDIT_TIME, [sw.FormatMillisecondsToDateTime(sw.ElapsedMilliseconds)]);
-    if Assigned(frmMain) then
+    if (Trim(FFileName) <> '') and FileExists(FFileName) then
     begin
-      frmMain.mmTimer.Lines.Add(TimeStr);
-      //Recarrega o arquivo após editar, para atualizar os dados
-      frmMain.RefreshFile;
+      case FOperation of
+        otInsert:
+          FFHistoryAppendLineOp(FFileName, 'INS', FTargetLine, '', FContent);
+        otDelete:
+          FFHistoryAppendLineOp(FFileName, 'DEL', FTargetLine, FOldLineText, '');
+        otEdit, otReplace:
+          FFHistoryAppendLineOp(FFileName, 'EDT', FTargetLine, FOldLineText, FContent);
+      end;
+    end;
+    if not FQuietFinish then
+    begin
+      TimeStr := Format(INFO_EDIT_TIME, [sw.FormatMillisecondsToDateTime(sw.ElapsedMilliseconds)]);
+      if Assigned(frmMain) then
+      begin
+        frmMain.mmTimer.Lines.Add(TimeStr);
+        //Recarrega o arquivo após editar, para atualizar os dados
+        frmMain.RefreshFile;
+      end;
     end;
   end
   else
-    ShowMessage('Operation failed or cancelled.');
+  begin
+    if not FQuietFinish then
+    begin
+      if FErrorMsg <> '' then
+        ShowMessage('Error: ' + FErrorMsg)
+      else
+        ShowMessage('Operation failed or cancelled.');
+    end;
+  end;
+end;
+
+class function TEditFileThread.RunEditWait(const AFileName: String; const Op: TOperationType;
+  const LineNum: Int64; const Txt: String; const AIsRawContent: Boolean = False): Boolean;
+var
+  Th: TEditFileThread;
+  H: THandle;
+  wr: DWORD;
+  ha: array[0..0] of THandle;
+  bWaitAll: LongBool;
+begin
+  Th := TEditFileThread.Create(AFileName, Op, LineNum, Txt, True, False, False, True, AIsRawContent);
+  try
+    { MsgWaitForMultipleObjects(1,...): MsgWaitForSingleObject nao e' export em todas as user32 (macro C). }
+    H := 0;
+    bWaitAll := False;
+    while True do
+    begin
+      if H = 0 then
+        H := Th.Handle;
+      if H <> 0 then
+      begin
+        ha[0] := H;
+        wr := MsgWaitForMultipleObjects(1, ha, bWaitAll, 80, cQS_ALLINPUT_FOR_WAIT);
+        if wr = WAIT_OBJECT_0 then
+          Break;
+        if wr = WAIT_FAILED then
+        begin
+          wr := WaitForSingleObject(H, 0);
+          if wr = WAIT_OBJECT_0 then
+            Break;
+        end;
+      end;
+      Application.ProcessMessages;
+      { Delphi 7: ProcessMessages nao despacha TThread.Synchronize; FinishThread e'
+        enfileirado aqui ? esgotar a fila (varios Synchronize seguidos). }
+      while CheckSynchronize do;
+      if H = 0 then
+        Sleep(2);
+    end;
+    Result := Th.EditSucceeded;
+  finally
+    Th.Free;
+  end;
 end;
 
 procedure TEditFileThread.Execute;
@@ -782,22 +938,34 @@ var
   AbsOffset: Int64;
   CurrentLine: Int64;
   NewPercent: Integer;
+  NewTh: Integer;
+  ThScaled: Int64;
   i, LineLen: Integer;
+  FinalErr: string;
+  RawOld: string;
 begin
   inherited;
-  FTempFileName := ExtractFilePath(ParamStr(0)) + 'temp_edit.txt';
+  if Assigned(frmMain) then
+    Synchronize(frmMain.CloseFileStreams);
+  FTempFileName := NewFastFileTemp('edit');
   ForceDeleteFile(FTempFileName);
 
   MMF := nil;
   DestWriter := nil;
   try
+    try
     MMF := TMMFReader.Create(FFileName);
-    DestWriter := TBufferedTextWriter.Create(FTempFileName, 16 * 1024 * 1024);
-
     FTotalSize := MMF.FileSize;
+    if not VolumeHasMinFreeBytes(FFileName, FTotalSize + 64 * 1024 * 1024) then
+    begin
+      FErrorMsg := TrText('Not enough free disk space to complete this operation safely.');
+      raise Exception.Create(FErrorMsg);
+    end;
+    DestWriter := TBufferedTextWriter.Create(FTempFileName, 16 * 1024 * 1024);
     CurrentLine := 1;
     AbsOffset := 0;
     FCurrentPercent := 0;
+    FLastProgressThousandths := -100;
 
     while (AbsOffset < FTotalSize) and (not Terminated) do
     begin
@@ -816,13 +984,28 @@ begin
           begin
             case FOperation of
               otInsert: begin
-                DestWriter.WriteLine(AnsiToUTF8(string(FContent)));
+                if FIsRawContent then DestWriter.WriteLine(string(FContent)) else DestWriter.WriteLine(AnsiToUTF8(string(FContent)));
                 DestWriter.WriteRaw(PLineStart, LineLen);
               end;
               otEdit, otReplace: begin
-                DestWriter.WriteLine(AnsiToUTF8(string(FContent)));
+                SetLength(RawOld, LineLen);
+                if LineLen > 0 then
+                  Move(PLineStart^, RawOld[1], LineLen);
+                FOldLineText := string(RawOld);
+                while (Length(FOldLineText) > 0) and
+                  (FOldLineText[Length(FOldLineText)] in [#10, #13]) do
+                  SetLength(FOldLineText, Length(FOldLineText) - 1);
+                if FIsRawContent then DestWriter.WriteLine(string(FContent)) else DestWriter.WriteLine(AnsiToUTF8(string(FContent)));
               end;
-              otDelete: ;
+              otDelete: begin
+                SetLength(RawOld, LineLen);
+                if LineLen > 0 then
+                  Move(PLineStart^, RawOld[1], LineLen);
+                FOldLineText := string(RawOld);
+                while (Length(FOldLineText) > 0) and
+                  (FOldLineText[Length(FOldLineText)] in [#10, #13]) do
+                  SetLength(FOldLineText, Length(FOldLineText) - 1);
+              end;
             end;
           end
           else
@@ -838,12 +1021,22 @@ begin
 
       if FTotalSize > 0 then
       begin
-        NewPercent := Round((AbsOffset * 100) / FTotalSize);
-        if NewPercent > FCurrentPercent then
+        ThScaled := (AbsOffset * 1000) div FTotalSize;
+        if ThScaled > 1000 then ThScaled := 1000;
+        NewTh := Integer(ThScaled);
+        { ~0,4% de ficheiro por passo: mais suave que saltos de 1% em ficheiros grandes. }
+        if (NewTh >= FLastProgressThousandths + 4) or (NewTh >= 1000) then
         begin
+          FLastProgressThousandths := NewTh;
+          NewPercent := NewTh div 10;
+          if NewPercent > 100 then NewPercent := 100;
           FCurrentPercent := NewPercent;
           FPercentToSync := FCurrentPercent;
-          Synchronize(SyncProgress);
+          if FShowLoadingUI then
+            Synchronize(SyncProgress)
+          else if Assigned(frmSmoothLoading) then
+            { Merge/RunEditWait na main: evita Synchronize + fila; PostMessage nao bloqueia a worker. }
+            TfrmSmoothLoading.PostProgressFromWorker(FPercentToSync);
         end;
       end;
     end;
@@ -851,18 +1044,21 @@ begin
     FreeAndNil(DestWriter);
     FreeAndNil(MMF);
 
-    if ForceDeleteFile(FFileName) then
-      RenameFile(FTempFileName, FFileName);
+    FSuccess := TryRenameTempOverTarget(FTempFileName, FFileName, FinalErr);
+    if not FSuccess then
+      FErrorMsg := FinalErr;
 
-    FSuccess := True;
   except
     on E: Exception do begin
       FErrorMsg := E.Message;
       LogAsync(Format('Log_FastFile%s.txt', [FormatDateTime('ddmmyyyyhhnn', Now)]), '[EditFileThread] ' + E.Message);
       if Assigned(MMF) then MMF.Free;
       if Assigned(DestWriter) then DestWriter.Free;
-      Synchronize(SyncError);
     end;
+  end;
+  finally
+    if (FTempFileName <> '') and FileExists(FTempFileName) then
+      ForceDeleteFile(FTempFileName);
   end;
   Synchronize(FinishThread);
 end;
@@ -920,7 +1116,6 @@ end;
 
 var
   MMF: TMMFReader;
-  LastErr: DWORD;
   DestWriter: TBufferedTextWriter;
   P, PLineStart: PAnsiChar;
   Contiguous: Cardinal;
@@ -939,7 +1134,7 @@ begin
   inherited;
   if Assigned(frmMain) then
     Synchronize(frmMain.CloseFileStreams);
-  FTempFileName := ExtractFilePath(ParamStr(0)) + 'temp_merge.txt';
+  FTempFileName := NewFastFileTemp('merge');
   ForceDeleteFile(FTempFileName);
 
   DeltaLines := TStringList.Create;
@@ -1005,6 +1200,8 @@ begin
   try
     try
       FTotalSize := MMF.FileSize;
+      if not VolumeHasMinFreeBytes(FFileName, FTotalSize + 64 * 1024 * 1024) then
+        raise Exception.Create(TrText('Not enough free disk space to complete this operation safely.'));
       CurrentLine := 1;
       AbsOffset := 0;
       FCurrentPercent := 0;
@@ -1066,24 +1263,13 @@ begin
       FreeAndNil(DestWriter);
       FreeAndNil(MMF);
 
-      if not ForceDeleteFile(FFileName) then
-         raise Exception.Create('Could not remove or rename the original file. It is still locked by the system or antivirus.');
-
-      LastErr := 0;
-      for i := 1 to 120 do
-      begin
-        if RenameFile(FTempFileName, FFileName) then
-          Break;
-        LastErr := GetLastError;
-        Sleep(500);
-      end;
-
-      if not FileExists(FFileName) then
-         raise Exception.CreateFmt('Temp file could not be renamed automatically. Error %d: %s', [LastErr, SysErrorMessage(LastErr)]);
+      if not TryRenameTempOverTarget(FTempFileName, FFileName, FErrorMsg) then
+        raise Exception.Create(FErrorMsg);
 
       FSuccess := True;
     except
-      on E: Exception do begin
+      on E: Exception do
+      begin
         FErrorMsg := E.Message;
         LogAsync(Format('Log_FastFile%s.txt', [FormatDateTime('ddmmyyyyhhnn', Now)]), '[MergeDeltaThread] ' + E.Message);
         if Assigned(MMF) then FreeAndNil(MMF);
@@ -1094,6 +1280,8 @@ begin
   finally
     FreeAndNil(DestWriter);
     FreeAndNil(MMF);
+    if (FTempFileName <> '') and FileExists(FTempFileName) then
+      ForceDeleteFile(FTempFileName);
   end;
   Synchronize(FinishThread);
 end;
@@ -1420,15 +1608,56 @@ begin
   Msg.Result := 1;
 end;
 
+procedure TfrmSmoothLoadingForm.ApplySmoothProgress(Percent: Integer);
+var
+  R: TRect;
+begin
+  FIsDeterminate := True;
+  if Percent > 100 then Percent := 100;
+  if Percent < 0 then Percent := 0;
+  { Alvo apenas: o tmrAnimation interpola FCurrentProgress -> FTargetProgress (preenchimento suave). }
+  if Percent + 0.5 < FCurrentProgress then
+    FCurrentProgress := Percent;
+  FTargetProgress := Percent;
+  if Assigned(tmrAnimation) and (not tmrAnimation.Enabled) then
+    tmrAnimation.Enabled := True;
+  if Assigned(pnlContainer) and Assigned(pbProgressBar) and HandleAllocated then
+  begin
+    R := pbProgressBar.BoundsRect;
+    OffsetRect(R, pnlContainer.Left, pnlContainer.Top);
+    InvalidateRect(Handle, @R, False);
+  end
+  else if Assigned(pbProgressBar) then
+    pbProgressBar.Invalidate;
+end;
+
+procedure TfrmSmoothLoadingForm.WMSmoothProgress(var Msg: TMessage);
+begin
+  { Um passo por mensagem: fundir com PeekMessage fazia a barra saltar directo
+    para o ultimo % quando a fila encheia durante trabalho CPU na worker. }
+  ApplySmoothProgress(Integer(Msg.WParam));
+  Msg.Result := 0;
+end;
+
 procedure TfrmSmoothLoadingForm.BuildBackground;
 var
   Row: Integer;
+  px: Int64;
 begin
   if (ClientWidth <= 0) or (ClientHeight <= 0) then Exit;
 
   FBackgroundBmp.PixelFormat := pf24bit;
   FBackgroundBmp.Width := ClientWidth;
   FBackgroundBmp.Height := ClientHeight;
+
+  { Evitar milhoes de LineTo (fullscreen HD+): primeira pintura do overlay parecia "travar". }
+  px := Int64(ClientWidth) * Int64(ClientHeight);
+  if px > 600000 then
+  begin
+    FBackgroundBmp.Canvas.Brush.Color := RGB(20, 30, 50);
+    FBackgroundBmp.Canvas.FillRect(Rect(0, 0, ClientWidth, ClientHeight));
+    Exit;
+  end;
 
   // Gradiente de fundo (desenhado 1x e cacheado)
   for Row := 0 to ClientHeight do
@@ -1473,20 +1702,51 @@ end;
 
 class procedure TfrmSmoothLoading.ShowLoading(const MessageText: String);
 begin
-  if not Assigned(frmSmoothLoading) then
-    frmSmoothLoading := TfrmSmoothLoadingForm.Create(Application);
+  ShowLoading(nil, MessageText, True);
+end;
 
-  // 1. Configurações de estado inicial (ainda invisível)
-  frmSmoothLoading.AlphaBlend := True;
-  // Fade-in suave: começa mais transparente e vai até o alpha "normal"
-  frmSmoothLoading.FFadeEndAlpha := 230; // mantém o visual atual
-  frmSmoothLoading.AlphaBlendValue := frmSmoothLoading.FFadeStartAlpha;
-  frmSmoothLoading.FFadeInActive := True;
-  frmSmoothLoading.FFadeStartTick := GetTickCount;
-  frmSmoothLoading.FIsDeterminate := False;
+class procedure TfrmSmoothLoading.ShowLoading(const MessageText: String; AStayOnTop: Boolean);
+begin
+  ShowLoading(nil, MessageText, AStayOnTop);
+end;
+
+class procedure TfrmSmoothLoading.ShowLoading(AOwner: TComponent; const MessageText: String; AStayOnTop: Boolean);
+begin
+  if not Assigned(frmSmoothLoading) then
+  begin
+    if AOwner <> nil then
+      frmSmoothLoading := TfrmSmoothLoadingForm.Create(AOwner)
+    else
+      frmSmoothLoading := TfrmSmoothLoadingForm.Create(Application);
+  end;
+
+  // 1. Overlay: sem owner (app) = opaco (barra fiavel em carga na main). Com owner
+  //    (ex. merge modal) = layered para logo BMP transparente / visual habitual.
+  if AOwner <> nil then
+  begin
+    frmSmoothLoading.AlphaBlend := True;
+    frmSmoothLoading.AlphaBlendValue := 230;
+    frmSmoothLoading.FFadeInActive := False;
+  end
+  else
+  begin
+    frmSmoothLoading.AlphaBlend := False;
+    frmSmoothLoading.FFadeInActive := False;
+  end;
+  frmSmoothLoading.FIsDeterminate := True;
   frmSmoothLoading.FCurrentProgress := 0;
   frmSmoothLoading.FTargetProgress := 0;
   frmSmoothLoading.lblMessage.Caption := MessageText;
+  if Assigned(frmSmoothLoading.lblDetail) then
+  begin
+    frmSmoothLoading.lblDetail.Caption := '';
+    frmSmoothLoading.lblDetail.Visible := False;
+  end;
+
+  if AStayOnTop then
+    frmSmoothLoading.FormStyle := fsStayOnTop
+  else
+    frmSmoothLoading.FormStyle := fsNormal;
 
   // 2) Força fullscreen antes de mostrar
   frmSmoothLoading.ForceFullScreen;
@@ -1496,12 +1756,17 @@ begin
   // 3. Posicionamento e arredondamento
   frmSmoothLoading.CenterContainer;
   frmSmoothLoading.RoundControl(frmSmoothLoading.pnlContainer, 50);
-  
+
+  frmSmoothLoading.FLastPaintedProgress := -1;
   frmSmoothLoading.tmrAnimation.Enabled := True;
   frmSmoothLoading.lblMessage.Font.Color := $00FFF0E6;
   
   // Força o Windows a processar a exibição imediatamente
   Application.ProcessMessages;
+  if (not AStayOnTop) and frmSmoothLoading.HandleAllocated then
+    frmSmoothLoading.BringToFront;
+  if Assigned(frmSmoothLoading.imgLogo) then
+    frmSmoothLoading.imgLogo.Invalidate;
 end;
 
 procedure TfrmSmoothLoadingForm.tmrAnimationTimer(Sender: TObject);
@@ -1509,15 +1774,14 @@ var
   Elapsed: Cardinal;
   NewAlpha: Integer;
 begin
-  // Fade-in suave (opcional) ao exibir
-  if FFadeInActive then
+  if FFadeInActive and AlphaBlend then
   begin
     Elapsed := GetTickCount - FFadeStartTick;
     if (FFadeDurationMS = 0) then
       NewAlpha := FFadeEndAlpha
     else
       NewAlpha := FFadeStartAlpha +
-        Round((FFadeEndAlpha - FFadeStartAlpha) * (Elapsed / FFadeDurationMS));    
+        Round((FFadeEndAlpha - FFadeStartAlpha) * (Elapsed / FFadeDurationMS));
 
     if NewAlpha >= FFadeEndAlpha then
     begin
@@ -1525,7 +1789,7 @@ begin
       FFadeInActive := False;
     end
     else if NewAlpha <= 1 then
-      AlphaBlendValue := 2 // nunca deixe "invisível" total
+      AlphaBlendValue := 2
     else
       AlphaBlendValue := Byte(NewAlpha);
   end;
@@ -1533,46 +1797,89 @@ begin
   if not FIsDeterminate then
   begin
     FCurrentProgress := FCurrentProgress + 1.5;
-    if FCurrentProgress > 100 then FCurrentProgress := 0;
+    if FCurrentProgress > 100 then
+      FCurrentProgress := 0;
   end
   else
   begin
     if Abs(FCurrentProgress - FTargetProgress) > 0.1 then
-      FCurrentProgress := FCurrentProgress + (FTargetProgress - FCurrentProgress) * 0.15;
+      FCurrentProgress := FCurrentProgress + (FTargetProgress - FCurrentProgress) * 0.15
+    else if Abs(FCurrentProgress - FTargetProgress) > 0.001 then
+    begin
+      FCurrentProgress := FTargetProgress;
+      FLastPaintedProgress := FCurrentProgress;
+      if Assigned(pbProgressBar) then
+        pbProgressBar.Invalidate;
+    end
+    else
+      FCurrentProgress := FTargetProgress;
   end;
 
-  // Redesenha só quando necessário (evita flicker)
-  if Abs(FLastPaintedProgress - FCurrentProgress) > 0.2 then
+  if (not FIsDeterminate) or (Abs(FCurrentProgress - FTargetProgress) > 0.1) then
   begin
-    FLastPaintedProgress := FCurrentProgress;
-    pbProgressBar.Invalidate;
+    if Abs(FLastPaintedProgress - FCurrentProgress) > 0.15 then
+    begin
+      FLastPaintedProgress := FCurrentProgress;
+      if Assigned(pbProgressBar) then
+        pbProgressBar.Invalidate;
+    end;
+    if not FIsDeterminate then
+    begin
+      if Assigned(pbProgressBar) then
+        pbProgressBar.Invalidate;
+    end;
   end;
-
-  pbProgressBar.Invalidate;
 end;
 
 class procedure TfrmSmoothLoading.UpdateProgress(Percent: Integer);
 begin
-  if Assigned(frmSmoothLoading) then
+  if not Assigned(frmSmoothLoading) then Exit;
+  if Percent > 100 then Percent := 100;
+  if Percent < 0 then Percent := 0;
+  { Fora da main thread: PostMessage pode ser tratado em lote antes do
+    paint visivel. SendMessage forca o proc. da janela na main thread ja
+    aqui (bloqueia a worker ate pintar). }
+  if GetCurrentThreadId = MainThreadID then
+    frmSmoothLoading.ApplySmoothProgress(Percent)
+  else if frmSmoothLoading.HandleAllocated then
+    SendMessage(frmSmoothLoading.Handle, WM_APP + 77, WPARAM(Percent), 0);
+end;
+
+class procedure TfrmSmoothLoading.PostProgressFromWorker(Percent: Integer);
+begin
+  if not Assigned(frmSmoothLoading) then Exit;
+  if Percent > 100 then Percent := 100;
+  if Percent < 0 then Percent := 0;
+  if GetCurrentThreadId = MainThreadID then
+    frmSmoothLoading.ApplySmoothProgress(Percent)
+  else if frmSmoothLoading.HandleAllocated then
+    PostMessage(frmSmoothLoading.Handle, WM_APP + 77, WPARAM(Percent), 0);
+end;
+
+class procedure TfrmSmoothLoading.UpdateProgressWithDetail(Percent: Integer; const Detail: string);
+begin
+  UpdateProgress(Percent);
+  if Assigned(frmSmoothLoading) and Assigned(frmSmoothLoading.lblDetail) then
   begin
-    frmSmoothLoading.FIsDeterminate := True;
-    if Percent > 100 then Percent := 100;
-    if Percent < 0 then Percent := 0;
-    frmSmoothLoading.FTargetProgress := Percent;
+    frmSmoothLoading.lblDetail.Caption := Detail;
+    frmSmoothLoading.lblDetail.Visible := Trim(Detail) <> '';
   end;
 end;
 
 procedure TfrmSmoothLoadingForm.FormPaint(Sender: TObject);
-var Row: Integer;
 begin
-  // Gradiente de fundo
-  for Row := 0 to ClientHeight do
+  { Antes: gradiente linha-a-linha no Canvas a cada WM_PAINT (fullscreen = UI "congelada"). }
+  if (ClientWidth > 0) and (ClientHeight > 0) then
   begin
-    Canvas.Pen.Color := RGB(20 + MulDiv(Row, 10, ClientHeight), 
-                            30 + MulDiv(Row, 15, ClientHeight), 
-                            50 + MulDiv(Row, 30, ClientHeight));
-    Canvas.MoveTo(0, Row);
-    Canvas.LineTo(ClientWidth, Row);
+    if (FBackgroundBmp.Width <> ClientWidth) or (FBackgroundBmp.Height <> ClientHeight) then
+      BuildBackground;
+    if (FBackgroundBmp.Width = ClientWidth) and (FBackgroundBmp.Height = ClientHeight) then
+      Canvas.Draw(0, 0, FBackgroundBmp)
+    else
+    begin
+      Canvas.Brush.Color := RGB(20, 30, 50);
+      Canvas.FillRect(ClientRect);
+    end;
   end;
 end;
 
@@ -1682,10 +1989,15 @@ end;
 
 constructor TReplaceAllThread.Create(const AFileName, AFindText, AReplaceText: String;
   const ACaseSensitive, AWholeWord: Boolean;
-  const AutoHide: Boolean; const ShowUI: Boolean);
+  const AutoHide: Boolean; const ShowUI: Boolean;
+  const ASegmented: Boolean; const AIndexFileName: string;
+  const ALinesPerSegment: Integer;
+  const AOutputOverride: string;
+  const ASilent: Boolean;
+  const AFreeOnTerminate: Boolean);
 begin
   inherited Create(True);
-  FreeOnTerminate := True;
+  FreeOnTerminate := AFreeOnTerminate;
   FFileName := AFileName;
   FFindText := AFindText;
   FReplaceText := AReplaceText;
@@ -1693,15 +2005,24 @@ begin
   FWholeWord := AWholeWord;
   FAutoHide := AutoHide;
   FShowLoadingUI := ShowUI;
+  FSegmented := ASegmented;
+  FIndexFileName := AIndexFileName;
+  if ALinesPerSegment < 5000 then
+    FLinesPerSegment := 5000
+  else
+    FLinesPerSegment := ALinesPerSegment;
+  FOutputOverride := AOutputOverride;
+  FSilent := ASilent;
   FReplacedCount := 0;
   if FShowLoadingUI then
   begin
-    FLoadingMsg := 'Replacing ...';
+    FLoadingMsg := TrText('Replacing (streaming to temp file)...');
     FProgressToSet := 0;
     Synchronize(SyncShowLoading);
     Synchronize(SyncSetProgress);
   end;
   FSuccess := False;
+  FReplaceLimitHit := False;
   sw := TStopWatch.Create(True);
   Resume;
 end;
@@ -1729,12 +2050,14 @@ end;
 
 procedure TReplaceAllThread.SyncProgress;
 begin
-  TfrmSmoothLoading.UpdateProgress(FPercentToSync);
+  if FShowLoadingUI then
+    TfrmSmoothLoading.UpdateProgressWithDetail(FPercentToSync, FDetailSync);
 end;
 
 procedure TReplaceAllThread.SyncError;
 begin
-  MessageDlg('[ReplaceAll] Error: ' + FErrorMsg, mtError, [mbOK], 0);
+  if (FErrorMsg <> '') and (not FSilent) then
+    MessageDlg(TrText('[ReplaceAll] Error: ') + FErrorMsg, mtError, [mbOK], 0);
 end;
 
 procedure TReplaceAllThread.FinishThread;
@@ -1749,13 +2072,476 @@ begin
 
   if FSuccess then
   begin
+    if (Trim(FFileName) <> '') then
+      FFHistoryAppendReplaceAll(FFileName, FReplacedCountSync, FReplaceLimitHit,
+        Copy(FFindText, 1, 200), Copy(FReplaceText, 1, 200));
     sw.Stop;
     TimerStr := Format('Replace All completed. %d replacement(s). Time: %s ms.',
       [FReplacedCountSync, IntToStr(sw.ElapsedMilliseconds)]);
-    if Assigned(frmMain) then
+    if Assigned(frmMain) and (not FSilent) then
     begin
       frmMain.mmTimer.Lines.Add(TimerStr);
       frmMain.RefreshFile;
+    end;
+  end
+  else if FReplaceLimitHit and (FErrorMsg <> '') then
+  begin
+    if not FSilent then
+      MessageDlg(FErrorMsg, mtWarning, [mbOK], 0);
+  end
+  else if (not FSuccess) and (FErrorMsg <> '') then
+  begin
+    if not FSilent then
+      MessageDlg(TrText('[ReplaceAll] ') + FErrorMsg, mtError, [mbOK], 0);
+  end;
+end;
+
+function ReadIndexLineStart1Based(Idx: TFileStream; LineIdx0: Int64): Int64;
+var
+  OffsetStr: AnsiString;
+begin
+  Result := -1;
+  if (not Assigned(Idx)) or (LineIdx0 < 0) then Exit;
+  Idx.Seek(LineIdx0 * INDEX_RECORD_SIZE, soFromBeginning);
+  SetLength(OffsetStr, 18);
+  if Idx.Read(Pointer(OffsetStr)^, 18) < 18 then Exit;
+  Result := StrToInt64Def(Trim(string(OffsetStr)), -1);
+end;
+
+procedure CopyFileRangeToFile(const SourcePath: string; Start0, Len: Int64; const DestPath: string);
+var
+  FS, FD: TFileStream;
+  Buf: array[0..65535] of Byte;
+  Rem: Int64;
+  n, r: Integer;
+begin
+  FS := TFileStream.Create(SourcePath, fmOpenRead or fmShareDenyNone);
+  try
+    FD := TFileStream.Create(DestPath, fmCreate);
+    try
+      FS.Position := Start0;
+      Rem := Len;
+      while Rem > 0 do
+      begin
+        if Rem > SizeOf(Buf) then
+          n := SizeOf(Buf)
+        else
+          n := Integer(Rem);
+        r := FS.Read(Buf, n);
+        if r <= 0 then Break;
+        FD.WriteBuffer(Buf, r);
+        Dec(Rem, r);
+      end;
+    finally
+      FD.Free;
+    end;
+  finally
+    FS.Free;
+  end;
+end;
+
+procedure AppendFileToStream(Dest: TFileStream; const FilePath: string);
+var
+  S: TFileStream;
+begin
+  S := TFileStream.Create(FilePath, fmOpenRead or fmShareDenyNone);
+  try
+    Dest.CopyFrom(S, S.Size);
+  finally
+    S.Free;
+  end;
+end;
+
+function LineInSortedInt64Array(const A: array of Int64; V: Int64): Boolean;
+var
+  L, H, M: Integer;
+begin
+  L := Low(A);
+  H := High(A);
+  if H < L then
+  begin
+    Result := False;
+    Exit;
+  end;
+  while L <= H do
+  begin
+    M := (L + H) shr 1;
+    if A[M] = V then
+    begin
+      Result := True;
+      Exit;
+    end;
+    if A[M] < V then
+      L := M + 1
+    else
+      H := M - 1;
+  end;
+  Result := False;
+end;
+
+procedure CopyStreamRangeBytes(Src: TFileStream; Dest: TFileStream; Len: Int64);
+var
+  Buf: array[0..65535] of Byte;
+  Rem: Int64;
+  n, r: Integer;
+begin
+  Rem := Len;
+  while Rem > 0 do
+  begin
+    if Rem > SizeOf(Buf) then
+      n := SizeOf(Buf)
+    else
+      n := Integer(Rem);
+    r := Src.Read(Buf, n);
+    if r <= 0 then
+      Break;
+    Dest.WriteBuffer(Buf, r);
+    Dec(Rem, r);
+  end;
+end;
+
+procedure WriteSegmentKeepLines(Idx: TFileStream; Src: TFileStream;
+  TotalLines: Int64; LineStart, LineEnd: Int64;
+  const LinesToDelete: array of Int64; const DestPath: string;
+  out ALocalErr: string);
+var
+  OutF: TFileStream;
+  L0: Int64;
+  Line1: Int64;
+  Start1, Next1: Int64;
+  Len0: Int64;
+  Start0: Int64;
+begin
+  ALocalErr := '';
+  OutF := TFileStream.Create(DestPath, fmCreate);
+  try
+    L0 := LineStart;
+    while L0 <= LineEnd do
+    begin
+      Line1 := L0 + 1;
+      if LineInSortedInt64Array(LinesToDelete, Line1) then
+      begin
+        Inc(L0);
+        Continue;
+      end;
+      Start1 := ReadIndexLineStart1Based(Idx, L0);
+      if Start1 < 1 then
+      begin
+        ALocalErr := TrText('Segmented replace: invalid line index in temp.txt.');
+        Exit;
+      end;
+      if L0 + 1 < TotalLines then
+        Next1 := ReadIndexLineStart1Based(Idx, L0 + 1)
+      else
+        Next1 := Src.Size + 1;
+      Len0 := Next1 - Start1;
+      if Len0 <= 0 then
+      begin
+        ALocalErr := TrText('Segmented replace: invalid line index in temp.txt.');
+        Exit;
+      end;
+      Start0 := Start1 - 1;
+      Src.Position := Start0;
+      CopyStreamRangeBytes(Src, OutF, Len0);
+      Inc(L0);
+    end;
+  finally
+    OutF.Free;
+  end;
+end;
+
+function TrySegmentedBatchDelete(const FileName, IndexFileName: string;
+  const LinesToDelete1Based: array of Int64; LinesPerSegment: Integer;
+  out AErrorMsg: string): Boolean;
+var
+  Idx, Src, Merge: TFileStream;
+  TotalLines: Int64;
+  TotalParts: Int64;
+  LineStart, LineEnd: Int64;
+  SegOut, FTempMerge: string;
+  FinalErr: string;
+  LocalErr: string;
+  Aborted: Boolean;
+begin
+  Result := False;
+  AErrorMsg := '';
+  if (IndexFileName = '') or (not FileExists(IndexFileName)) then
+    Exit;
+  if High(LinesToDelete1Based) < Low(LinesToDelete1Based) then
+    Exit;
+  if LinesPerSegment < 5000 then
+    LinesPerSegment := 5000;
+
+  Idx := nil;
+  Src := nil;
+  Merge := nil;
+  FTempMerge := '';
+  try
+    Idx := TFileStream.Create(IndexFileName, fmOpenRead or fmShareDenyNone);
+    Src := TFileStream.Create(FileName, fmOpenRead or fmShareDenyNone);
+    try
+      TotalLines := Idx.Size div INDEX_RECORD_SIZE;
+      if TotalLines < 2 then
+        Exit;
+
+      TotalParts := (TotalLines + LinesPerSegment - 1) div LinesPerSegment;
+      if TotalParts <= 1 then
+        Exit;
+
+      if not VolumeHasMinFreeBytes(FileName, Src.Size + 64 * 1024 * 1024) then
+      begin
+        AErrorMsg := TrText('Not enough free disk space to complete this operation safely.');
+        Result := True;
+        Exit;
+      end;
+
+      FTempMerge := NewFastFileTemp('bdel');
+      UnUtils.ForceDeleteFile(FTempMerge);
+      Merge := TFileStream.Create(FTempMerge, fmCreate);
+      Aborted := False;
+      try
+        LineStart := 0;
+        while LineStart < TotalLines do
+        begin
+          LineEnd := LineStart + LinesPerSegment - 1;
+          if LineEnd >= TotalLines then
+            LineEnd := TotalLines - 1;
+
+          SegOut := NewFastFileTemp('dseg_out');
+          UnUtils.ForceDeleteFile(SegOut);
+          try
+            WriteSegmentKeepLines(Idx, Src, TotalLines, LineStart, LineEnd,
+              LinesToDelete1Based, SegOut, LocalErr);
+            if LocalErr <> '' then
+            begin
+              AErrorMsg := LocalErr;
+              Aborted := True;
+              Break;
+            end;
+            AppendFileToStream(Merge, SegOut);
+          finally
+            UnUtils.ForceDeleteFile(SegOut);
+          end;
+
+          LineStart := LineEnd + 1;
+        end;
+      finally
+        FreeAndNil(Merge);
+      end;
+
+      if Aborted then
+      begin
+        UnUtils.ForceDeleteFile(FTempMerge);
+        Result := True;
+        Exit;
+      end;
+    finally
+      FreeAndNil(Idx);
+      FreeAndNil(Src);
+    end;
+
+    if not UnUtils.TryRenameTempOverTarget(FTempMerge, FileName, FinalErr) then
+      AErrorMsg := FinalErr
+    else
+      AErrorMsg := '';
+    Result := True;
+  except
+    on E: Exception do
+    begin
+      AErrorMsg := E.Message;
+      Result := True;
+      FreeAndNil(Merge);
+      FreeAndNil(Idx);
+      FreeAndNil(Src);
+      if FTempMerge <> '' then
+        UnUtils.ForceDeleteFile(FTempMerge);
+    end;
+  end;
+end;
+
+function TReplaceAllThread.TrySegmentedReplace: Boolean;
+var
+  Idx, Src: TFileStream;
+  Merge: TFileStream;
+  TotalLines: Int64;
+  TotalParts: Int64;
+  PartI: Integer;
+  LineStart, LineEnd: Int64;
+  Start1, Next1: Int64;
+  Len0: Int64;
+  Start0: Int64;
+  SegIn, SegOut: string;
+  Inner: TReplaceAllThread;
+  FinalErr: string;
+  Pct: Integer;
+begin
+  Result := False;
+  if (FIndexFileName = '') or (not FileExists(FIndexFileName)) then Exit;
+
+  Idx := nil;
+  Src := nil;
+  Merge := nil;
+  FSuccess := True;
+  try
+    Idx := TFileStream.Create(FIndexFileName, fmOpenRead or fmShareDenyNone);
+    Src := TFileStream.Create(FFileName, fmOpenRead or fmShareDenyNone);
+    TotalLines := Idx.Size div INDEX_RECORD_SIZE;
+    if TotalLines < 2 then Exit;
+
+    TotalParts := (TotalLines + FLinesPerSegment - 1) div FLinesPerSegment;
+    if TotalParts <= 1 then Exit;
+
+    if not VolumeHasMinFreeBytes(FFileName, Src.Size + 64 * 1024 * 1024) then
+    begin
+      FErrorMsg := TrText('Not enough free disk space to complete this operation safely.');
+      FSuccess := False;
+      FReplacedCountSync := 0;
+      Synchronize(FinishThread);
+      Result := True;
+      Exit;
+    end;
+
+    FTempFileName := NewFastFileTemp('replace');
+    ForceDeleteFile(FTempFileName);
+    Merge := TFileStream.Create(FTempFileName, fmCreate);
+    try
+      FReplacedCount := 0;
+      FCurrentPercent := 0;
+
+      PartI := 0;
+      LineStart := 0;
+      while LineStart < TotalLines do
+      begin
+        if Terminated then Break;
+
+        LineEnd := LineStart + FLinesPerSegment - 1;
+        if LineEnd >= TotalLines then
+          LineEnd := TotalLines - 1;
+
+        Start1 := ReadIndexLineStart1Based(Idx, LineStart);
+        if Start1 < 1 then
+        begin
+          FErrorMsg := TrText('Segmented replace: invalid line index in temp.txt.');
+          FSuccess := False;
+          Break;
+        end;
+
+        if LineEnd + 1 < TotalLines then
+          Next1 := ReadIndexLineStart1Based(Idx, LineEnd + 1)
+        else
+          Next1 := Src.Size + 1;
+
+        Len0 := Next1 - Start1;
+        if Len0 <= 0 then
+        begin
+          Inc(PartI);
+          LineStart := LineEnd + 1;
+          Continue;
+        end;
+
+        Start0 := Start1 - 1;
+        SegIn := NewFastFileTemp('rseg_in');
+        SegOut := NewFastFileTemp('rseg_out');
+        ForceDeleteFile(SegIn);
+        ForceDeleteFile(SegOut);
+
+        try
+          CopyFileRangeToFile(FFileName, Start0, Len0, SegIn);
+
+          Inner := TReplaceAllThread.Create(SegIn, FFindText, FReplaceText,
+            FCaseSensitive, FWholeWord, False, False,
+            False, '', FLinesPerSegment, SegOut, True, False);
+          Inner.WaitFor;
+          try
+            if not Inner.OperationSucceeded then
+            begin
+              FSuccess := False;
+              if Inner.LastErrorMsg <> '' then
+                FErrorMsg := Inner.LastErrorMsg
+              else
+                FErrorMsg := TrText('[ReplaceAll] Segmented part failed.');
+              Break;
+            end;
+            Inc(FReplacedCount, Inner.ReplacedTotal);
+            if FReplacedCount >= REPLACE_ALL_MATCH_LIMIT then
+            begin
+              FReplaceLimitHit := True;
+              FErrorMsg := Format(TrText('Replace-all stopped at the safety limit of %d matches. The file was not modified.'),
+                [REPLACE_ALL_MATCH_LIMIT]);
+              FSuccess := False;
+              Break;
+            end;
+            if not FileExists(SegOut) then
+            begin
+              FErrorMsg := TrText('[ReplaceAll] Segmented output missing.');
+              FSuccess := False;
+              Break;
+            end;
+            AppendFileToStream(Merge, SegOut);
+          finally
+            Inner.Free;
+          end;
+        finally
+          ForceDeleteFile(SegIn);
+          ForceDeleteFile(SegOut);
+        end;
+
+        Pct := Round(((PartI + 1) * 100.0) / TotalParts);
+        if Pct > 100 then Pct := 100;
+        FPercentToSync := Pct;
+        FDetailSync := TrText('Segment') + ' ' + IntToStr(PartI + 1) + '/' + IntToStr(TotalParts) + #13#10 +
+          IntToStr(FReplacedCount) + ' ' + TrText('replacements');
+        if FShowLoadingUI then
+          Synchronize(SyncProgress);
+
+        Inc(PartI);
+        LineStart := LineEnd + 1;
+      end;
+    finally
+      FreeAndNil(Merge);
+    end;
+
+    FreeAndNil(Idx);
+    FreeAndNil(Src);
+
+    if Terminated then
+    begin
+      FSuccess := False;
+      FErrorMsg := TrText('Operation cancelled.');
+      ForceDeleteFile(FTempFileName);
+      FReplacedCountSync := FReplacedCount;
+      Synchronize(FinishThread);
+      Result := True;
+      Exit;
+    end;
+
+    if FReplaceLimitHit or (not FSuccess) then
+    begin
+      ForceDeleteFile(FTempFileName);
+      FReplacedCountSync := FReplacedCount;
+      Synchronize(FinishThread);
+      Result := True;
+      Exit;
+    end;
+
+    FReplacedCountSync := FReplacedCount;
+    FSuccess := TryRenameTempOverTarget(FTempFileName, FFileName, FinalErr);
+    if not FSuccess then
+      FErrorMsg := FinalErr;
+    Synchronize(FinishThread);
+    Result := True;
+  except
+    on E: Exception do
+    begin
+      FErrorMsg := E.Message;
+      FSuccess := False;
+      FReplacedCountSync := FReplacedCount;
+      FreeAndNil(Merge);
+      FreeAndNil(Idx);
+      FreeAndNil(Src);
+      ForceDeleteFile(FTempFileName);
+      Synchronize(FinishThread);
+      Result := True;
     end;
   end;
 end;
@@ -1917,17 +2703,16 @@ var
 
   procedure UpdateProgressAt(AbsPos: Int64);
   begin
-    if FileSize > 0 then
-    begin
-      NewPercent := Round((AbsPos * 100.0) / FileSize);
-      if NewPercent > 100 then NewPercent := 100;
-      if NewPercent > FCurrentPercent then
-      begin
-        FCurrentPercent := NewPercent;
-        FPercentToSync := FCurrentPercent;
-        Synchronize(SyncProgress);
-      end;
-    end;
+    if FileSize <= 0 then Exit;
+    NewPercent := Round((AbsPos * 100.0) / FileSize);
+    if NewPercent > 100 then NewPercent := 100;
+    if NewPercent > FCurrentPercent then
+      FCurrentPercent := NewPercent;
+    FPercentToSync := FCurrentPercent;
+    FDetailSync := UnUtils.FormatNumber(AbsPos) + ' / ' + UnUtils.FormatNumber(FileSize) + ' B' + #13#10 +
+      IntToStr(FReplacedCount) + ' ' + TrText('replacements');
+    if FShowLoadingUI then
+      Synchronize(SyncProgress);
   end;
 
 var
@@ -1939,19 +2724,32 @@ var
   CanReplace: Boolean;
   ByteBefore, ByteAfter: Byte;
   MatchBufIdx: Integer;
+  FinalErr: string;
 begin
   inherited;
-  FTempFileName := ExtractFilePath(ParamStr(0)) + 'temp_replace.txt';
+  if FSegmented and (FOutputOverride = '') and (FIndexFileName <> '') and FileExists(FIndexFileName) then
+  begin
+    if TrySegmentedReplace then
+      Exit;
+  end;
+
+  FTempFileName := NewFastFileTemp('replace');
   ForceDeleteFile(FTempFileName);
 
   MMF := nil;
   DestWriter := nil;
   try
+    try
     MMF := TMMFReader.Create(FFileName);
-    DestWriter := TBufferedTextWriter.Create(FTempFileName, 16 * 1024 * 1024);
-
     FileSize := MMF.FileSize;
     FTotalSize := FileSize;
+    if not VolumeHasMinFreeBytes(FFileName, FileSize + 64 * 1024 * 1024) then
+    begin
+      FErrorMsg := TrText('Not enough free disk space to complete this operation safely.');
+      raise Exception.Create(FErrorMsg);
+    end;
+    DestWriter := TBufferedTextWriter.Create(FTempFileName, 16 * 1024 * 1024);
+
     FCurrentPercent := 0;
     NeedLen := Length(FFindText);
     ReplaceBytes := AnsiString(FReplaceText);
@@ -1962,10 +2760,13 @@ begin
       WriteFromSource(0, FileSize);
       FreeAndNil(DestWriter);
       FreeAndNil(MMF);
-      if ForceDeleteFile(FFileName) then
-        RenameFile(FTempFileName, FFileName);
       FReplacedCountSync := 0;
-      FSuccess := True;
+      if FOutputOverride <> '' then
+        FSuccess := TryRenameTempOverTarget(FTempFileName, FOutputOverride, FinalErr)
+      else
+        FSuccess := TryRenameTempOverTarget(FTempFileName, FFileName, FinalErr);
+      if not FSuccess then
+        FErrorMsg := FinalErr;
       Synchronize(FinishThread);
       Exit;
     end;
@@ -2054,12 +2855,20 @@ begin
           WritePos := MatchAbsPos + Int64(NeedLen);
           SearchFrom := FoundIdx + NeedLen;
           Inc(FReplacedCount);
+          if FReplacedCount >= REPLACE_ALL_MATCH_LIMIT then
+          begin
+            FReplaceLimitHit := True;
+            Break;
+          end;
         end
         else
         begin
           SearchFrom := FoundIdx + 1;
         end;
       end;
+
+      if FReplaceLimitHit then
+        Break;
 
       CurPos := CurPos + Int64(BytesRead);
 
@@ -2084,17 +2893,35 @@ begin
       end;
     end;
 
+    if Terminated or FReplaceLimitHit then
+    begin
+      FreeAndNil(DestWriter);
+      FreeAndNil(MMF);
+      ForceDeleteFile(FTempFileName);
+      FReplacedCountSync := FReplacedCount;
+      if FReplaceLimitHit then
+        FErrorMsg := Format(TrText('Replace-all stopped at the safety limit of %d matches. The file was not modified.'),
+          [REPLACE_ALL_MATCH_LIMIT])
+      else if Terminated then
+        FErrorMsg := TrText('Operation cancelled.');
+      FSuccess := False;
+      Synchronize(FinishThread);
+      Exit;
+    end;
+
     if WritePos < FileSize then
       WriteFromSource(WritePos, FileSize - WritePos);
 
     FreeAndNil(DestWriter);
     FreeAndNil(MMF);
 
-    if ForceDeleteFile(FFileName) then
-      RenameFile(FTempFileName, FFileName);
-
     FReplacedCountSync := FReplacedCount;
-    FSuccess := True;
+    if FOutputOverride <> '' then
+      FSuccess := TryRenameTempOverTarget(FTempFileName, FOutputOverride, FinalErr)
+    else
+      FSuccess := TryRenameTempOverTarget(FTempFileName, FFileName, FinalErr);
+    if not FSuccess then
+      FErrorMsg := FinalErr;
   except
     on E: Exception do begin
       FErrorMsg := E.Message;
@@ -2102,8 +2929,11 @@ begin
         '[ReplaceAllThread] ' + E.Message);
       if Assigned(MMF) then MMF.Free;
       if Assigned(DestWriter) then DestWriter.Free;
-      Synchronize(SyncError);
     end;
+  end;
+  finally
+    if (FTempFileName <> '') and FileExists(FTempFileName) then
+      ForceDeleteFile(FTempFileName);
   end;
   Synchronize(FinishThread);
 end;
@@ -2594,6 +3424,298 @@ begin
     if Assigned(SrcStream) then FreeAndNil(SrcStream);
   end;
   Synchronize(FinishThread);
+end;
+
+{ ============================================================================ }
+{ THREAD: SPLIT FILE INTO EQUAL PARTS (byte targets + LF boundaries)           }
+{ ============================================================================ }
+
+constructor TSplitEqualPartsThread.Create(const ASourceFileName: String;
+  const APartCount: Integer; const AutoHide: Boolean = True;
+  const ShowUI: Boolean = True);
+begin
+  inherited Create(True);
+  FreeOnTerminate := True;
+  FSourceFileName := ASourceFileName;
+  FPartCount := APartCount;
+  FAutoHide := AutoHide;
+  FShowLoadingUI := ShowUI;
+  if FShowLoadingUI then
+  begin
+    FLoadingMsg := TrText('Splitting file into equal parts...');
+    FProgressToSet := 0;
+    Synchronize(SyncShowLoading);
+    Synchronize(SyncSetProgress);
+  end;
+  FSuccess := False;
+  FSuccessOutputDir := '';
+  FSuccessFirstPath := '';
+  FSuccessLastPath := '';
+  sw := TStopWatch.Create(True);
+  Resume;
+end;
+
+destructor TSplitEqualPartsThread.Destroy;
+begin
+  FreeAndNil(sw);
+  inherited;
+end;
+
+procedure TSplitEqualPartsThread.SyncShowLoading;
+begin
+  TfrmSmoothLoading.ShowLoading(FLoadingMsg);
+end;
+
+procedure TSplitEqualPartsThread.SyncHideLoading;
+begin
+  TfrmSmoothLoading.HideLoading;
+end;
+
+procedure TSplitEqualPartsThread.SyncSetProgress;
+begin
+  if FShowLoadingUI then
+    TfrmSmoothLoading.UpdateProgress(FProgressToSet);
+end;
+
+procedure TSplitEqualPartsThread.SyncProgress;
+begin
+  if not FShowLoadingUI then Exit;
+  FProgressToSet := FPercentToSync;
+  SyncSetProgress;
+end;
+
+procedure TSplitEqualPartsThread.SyncError;
+begin
+  if FAutoHide and FShowLoadingUI then
+    SyncHideLoading;
+end;
+
+procedure TSplitEqualPartsThread.SyncFinish;
+var
+  TimeStr: String;
+  Msg: String;
+begin
+  sw.Stop;
+  if FAutoHide and FShowLoadingUI then
+    SyncHideLoading;
+
+  if FSuccess then
+  begin
+    TimeStr := sw.FormatMillisecondsToDateTime(sw.ElapsedMilliseconds);
+    Msg := Format(TrText('SplitEqualParts.SuccessFormat'),
+      [FPartCount, FSuccessOutputDir, FSuccessFirstPath, FSuccessLastPath, TimeStr]);
+    Dialogs.ShowMessage(Msg);
+    if Assigned(frmMain) then
+      frmMain.mmTimer.Lines.Add(Format(TrText('SplitEqualParts.LogSummary'),
+        [FPartCount, FSuccessOutputDir]));
+  end
+  else if FErrorMsg <> '' then
+    Dialogs.ShowMessage(Format(TrText('SplitEqualParts.FailureFormat'), [FErrorMsg]))
+  else
+    Dialogs.ShowMessage(TrText('SplitEqualParts.CancelledOrIncomplete'));
+end;
+
+procedure TSplitEqualPartsThread.Execute;
+const
+  BUF_SIZE = 4 * 1024 * 1024;
+  SCAN_BUF = 256 * 1024;
+
+function ForceDeleteLocal(const FileName: string): Boolean;
+var
+  RetryCount: Integer;
+begin
+  Result := False;
+  if not FileExists(FileName) then begin Result := True; Exit; end;
+  for RetryCount := 1 to 10 do
+  begin
+    if DeleteFile(FileName) then
+    begin
+      Result := True;
+      Break;
+    end;
+    Sleep(200);
+  end;
+end;
+
+function OutputPartPath(const PartIndex1Based: Integer): String;
+var
+  DirPath, BaseName, ExtPart: String;
+begin
+  DirPath := ExtractFilePath(FSourceFileName);
+  BaseName := ExtractFileName(FSourceFileName);
+  ExtPart := ExtractFileExt(BaseName);
+  BaseName := ChangeFileExt(BaseName, '');
+  Result := IncludeTrailingPathDelimiter(DirPath) + BaseName +
+    Format('.part%.3d', [PartIndex1Based]) + ExtPart;
+end;
+
+{ Primeiro LF em ou apos MinPos; retorna S se nao houver LF ate o fim. }
+function FindLFEndAfter(InStr: TFileStream; const FileSize, MinPos: Int64): Int64;
+var
+  Buffer: array[0..SCAN_BUF - 1] of AnsiChar;
+  BytesRead: Integer;
+  Pos, StartRead: Int64;
+  i: Integer;
+begin
+  Result := FileSize;
+  if MinPos >= FileSize then Exit;
+
+  Pos := MinPos;
+  InStr.Seek(Pos, soFromBeginning);
+
+  while Pos < FileSize do
+  begin
+    StartRead := Pos;
+    BytesRead := InStr.Read(Buffer[0], SCAN_BUF);
+    if BytesRead <= 0 then Break;
+
+    for i := 0 to BytesRead - 1 do
+    begin
+      if Buffer[i] = #10 then
+      begin
+        Result := StartRead + i + 1;
+        Exit;
+      end;
+    end;
+    Inc(Pos, BytesRead);
+  end;
+end;
+
+procedure CopyRangeProgress(InStr, OutStr: TFileStream; const StartPos, ByteCount: Int64;
+  var Processed, TotalWork: Int64);
+var
+  Buffer: array of Byte;
+  Remaining, ToRead: Int64;
+  ReadBytes: Integer;
+  NewPercent: Integer;
+begin
+  if ByteCount <= 0 then Exit;
+  SetLength(Buffer, BUF_SIZE);
+  Remaining := ByteCount;
+  InStr.Seek(StartPos, soFromBeginning);
+
+  while (Remaining > 0) and (not Terminated) do
+  begin
+    ToRead := Remaining;
+    if ToRead > BUF_SIZE then
+      ToRead := BUF_SIZE;
+
+    ReadBytes := InStr.Read(Buffer[0], Integer(ToRead));
+    if ReadBytes <= 0 then Break;
+
+    OutStr.WriteBuffer(Buffer[0], ReadBytes);
+    Dec(Remaining, ReadBytes);
+    Inc(Processed, ReadBytes);
+
+    if TotalWork > 0 then
+    begin
+      NewPercent := Round((Processed * 100.0) / TotalWork);
+      if NewPercent > 100 then NewPercent := 100;
+      if NewPercent > FCurrentPercent then
+      begin
+        FCurrentPercent := NewPercent;
+        FPercentToSync := FCurrentPercent;
+        Synchronize(SyncProgress);
+      end;
+    end;
+  end;
+end;
+
+var
+  InStream, OutStream: TFileStream;
+  FileSize: Int64;
+  Boundaries: array of Int64;
+  k: Integer;
+  ideal, prev, b: Int64;
+  Processed, TotalWork: Int64;
+  PartPath: String;
+begin
+  inherited;
+  InStream := nil;
+  OutStream := nil;
+  SetLength(Boundaries, FPartCount + 1);
+
+  try
+    try
+      InStream := TFileStream.Create(FSourceFileName, fmOpenRead or fmShareDenyNone);
+      FileSize := InStream.Size;
+      if FileSize <= 0 then
+        raise Exception.Create(TrText('Source file is empty.'));
+
+      Boundaries[0] := 0;
+      Boundaries[FPartCount] := FileSize;
+      prev := 0;
+      FCurrentPercent := 0;
+
+      for k := 1 to FPartCount - 1 do
+      begin
+        if Terminated then Exit;
+        ideal := (Int64(k) * FileSize) div Int64(FPartCount);
+        if ideal <= prev then
+          ideal := prev + 1;
+        if ideal >= FileSize then
+          raise Exception.Create(TrText('Could not compute split boundaries: file too small for the requested number of parts.'));
+
+        b := FindLFEndAfter(InStream, FileSize, ideal);
+        while (b <= prev) and (b < FileSize) do
+          b := FindLFEndAfter(InStream, FileSize, prev + 1);
+
+        if b <= prev then
+          raise Exception.Create(TrText('Could not compute split boundaries: not enough line breaks for the requested number of parts.'));
+
+        Boundaries[k] := b;
+        prev := b;
+      end;
+
+      if Boundaries[FPartCount - 1] >= FileSize then
+        raise Exception.Create(TrText('Could not compute split boundaries: last part would be empty.'));
+
+      TotalWork := FileSize;
+      Processed := 0;
+
+      for k := 0 to FPartCount - 1 do
+      begin
+        if Terminated then Exit;
+        PartPath := OutputPartPath(k + 1);
+        ForceDeleteLocal(PartPath);
+        OutStream := TFileStream.Create(PartPath, fmCreate);
+        try
+          CopyRangeProgress(InStream, OutStream, Boundaries[k],
+            Boundaries[k + 1] - Boundaries[k], Processed, TotalWork);
+        finally
+          FreeAndNil(OutStream);
+        end;
+      end;
+
+      if (FileSize > 0) and (FCurrentPercent < 100) then
+      begin
+        FCurrentPercent := 100;
+        FPercentToSync := 100;
+        Synchronize(SyncProgress);
+      end;
+
+      FSuccessOutputDir := IncludeTrailingPathDelimiter(ExtractFilePath(FSourceFileName));
+      FSuccessFirstPath := OutputPartPath(1);
+      FSuccessLastPath := OutputPartPath(FPartCount);
+
+      FreeAndNil(InStream);
+      FSuccess := True;
+    except
+      on E: Exception do
+      begin
+        FErrorMsg := E.Message;
+        LogAsync(Format('Log_FastFile%s.txt', [FormatDateTime('ddmmyyyyhhnn', Now)]),
+          '[SplitEqualPartsThread] ' + E.Message);
+        if Assigned(OutStream) then FreeAndNil(OutStream);
+        if Assigned(InStream) then FreeAndNil(InStream);
+        Synchronize(SyncError);
+      end;
+    end;
+  finally
+    if Assigned(OutStream) then FreeAndNil(OutStream);
+    if Assigned(InStream) then FreeAndNil(InStream);
+  end;
+  Synchronize(SyncFinish);
 end;
 
 end.

@@ -16,6 +16,7 @@ type
     lblAppName: TsLabel;
     lblVersion: TsLabel;
     lblBuildTime: TsLabel;
+    lblDevelopedBy: TsLabel;
     lblHome: TsLabel;
     lblHomeURL: TsLabel;
     pnlGNU: TsPanel;
@@ -62,9 +63,13 @@ begin
   Caption := Tr('toolbar.about_fastfile', 'About FastFile');
   lblAppName.Caption  := APPLICATION_NAME;
   lblVersion.Caption  := UnUtils.GetDisplayVersion(True);
-  lblBuildTime.Caption := 'Build time: ' + FormatDateTime('Mmm dd yyyy - hh:nn:ss', Now);
-  lblHome.Caption := APPLICATION_FULLNAME + ':';
+  lblBuildTime.Caption := TrText('Build time: ') + FormatDateTime('Mmm dd yyyy - hh:nn:ss', Now);
+  lblDevelopedBy.Caption := TrText('Developed by: ') + 'Hamden Vogel';
+  lblHome.Caption := TrText('Contact email:');
   lblHomeURL.Caption := 'hamdenvogel@gmail.com';
+  lblBuildTime.AutoSize := True;
+  lblDevelopedBy.AutoSize := True;
+  lblHome.AutoSize := True;
   lblHomeURL.Left := lblHome.Left + lblHome.Width + 8;
 
   memoLicense.Lines.Clear;

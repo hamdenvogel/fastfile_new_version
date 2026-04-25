@@ -174,7 +174,8 @@ begin
   else
     Contiguous := Cardinal(Avail);
 
-  Result := PByte(Integer(FViewPtr) + Integer(Delta));
+  { Delta fits in Integer: view <= 128 MB and Delta < FViewSize. }
+  Result := PByte(PAnsiChar(FViewPtr) + Integer(Delta));
 end;
 
 function TMMFReader.ReadBytes(const AbsOffset: Int64; var Dest; const Len: Cardinal): Cardinal;
